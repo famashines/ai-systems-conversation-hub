@@ -116,7 +116,16 @@ export interface Reply {
   conversationId?: string;
 }
 
+export const noReasonText = "The run ended with no reason.";
+
+export const replyText = (text: string): string => text.replaceAll("\0", "").trim() || noReasonText;
+
 export function replyTo(event: RegisteredEvent): Reply | undefined {
+  const reply = rawReplyTo(event);
+  return reply && { ...reply, text: replyText(reply.text) };
+}
+
+function rawReplyTo(event: RegisteredEvent): Reply | undefined {
   switch (event.type) {
     case "orchestration.RunCompleted":
       return {
@@ -150,6 +159,7 @@ export function statusAfter(event: RegisteredEvent): TaskStatus | undefined {
       return "blocked";
     case "orchestration.RunCompleted":
     case "orchestration.RunFailed":
+    case "orchestration.MessageRefused":
       return "ended";
     default:
       return undefined;

@@ -51,6 +51,16 @@ collection `tasks`, from the orchestration events:
 | `RunStarted`                            | `running`  |
 | `RunBlocked`                            | `blocked`  |
 | `RunCompleted`, `RunFailed`             | `ended`    |
+| `MessageRefused`                        | `ended`    |
+
+`ended` is terminal: no later or replayed event changes it. Each state
+change and the kit `processed` marker of its event are in one MongoDB
+transaction, so a replay of `ORCHESTRATION` (for example after the
+durable consumer is made again) does not change the state.
+
+A chat task with no terminal event stays `running` until orchestration
+refuses a message for it. Then `MessageRefused` marks it `ended`, so it
+does not take the later messages with no `taskId`.
 
 A `TaskSubmitted` with no `conversationId` (a task from `POST /api/tasks`)
 is not a task of a thread. Its later events give no state and no reply.
@@ -84,6 +94,11 @@ comes in the thread as a reply.
 | `RunBlocked`        | `reason`   | yes     |
 | `MessageRefused`    | `reason`   | no      |
 
+The service removes NUL characters from the text and trims it. A `reason`
+can be valid and still give an empty text (for example `" "`). Then the
+reply text is `The run ended with no reason.`, so the reply is always a
+valid `ReplyText`.
+
 - The reply has `sourceEventId` (the orchestration `eventId`), a new
   `messageId`, `causationId` = the source event id, the `correlationId` of
   the source event and the actor `{ kind: "system", id: "conversation-hub" }`.
@@ -100,13 +115,13 @@ comes in the thread as a reply.
 
 ## API
 
-| Method | Path                                           | Does                                                                                                                                   |
-| ------ | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/internal/commands/post-owner-message`        | Post an owner message                                                                                                                  |
-| GET    | `/internal/events?afterPosition=<n>&limit=<m>` | Replay API: all events in position order                                                                                               |
-| GET    | `/health`                                      | Liveness: 200 while the process runs                                                                                                   |
-| GET    | `/ready`                                       | Readiness: 200 when MongoDB answers and the migrations are done, else 503 with the names of the failing checks (`mongo`, `migrations`) |
-| GET    | `/metrics`                                     | Prometheus metrics                                                                                                                     |
+| Method | Path                                           | Does                                                                                                                                                                                                                            |
+| ------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/internal/commands/post-owner-message`        | Post an owner message                                                                                                                                                                                                           |
+| GET    | `/internal/events?afterPosition=<n>&limit=<m>` | Replay API: all events in position order                                                                                                                                                                                        |
+| GET    | `/health`                                      | Liveness: 200 while the process runs                                                                                                                                                                                            |
+| GET    | `/ready`                                       | Readiness: 200 when MongoDB and NATS answer, the migrations are done, the relay sees `CONVERSATION` and the consumer exists, else 503 with the names of the failing checks (`mongo`, `nats`, `relay`, `consumer`, `migrations`) |
+| GET    | `/metrics`                                     | Prometheus metrics                                                                                                                                                                                                              |
 
 Errors are RFC 9457 problem JSON with a `code` (`@famashines/ai-systems-kit/http`).
 
@@ -145,11 +160,13 @@ The body is a `CommandEnvelopeV1` with a
 
 The service makes the `messageId` (UUID v4). The events have
 `correlationId` = the `messageId`, `causationId` = the `commandId`, and
-the `actor` of the command. The first message appends with
-`expectedVersion: 0`; later messages append with no version check,
-because the decision needs only "the thread exists" and the task states.
-A same-time first message to the same new id gives 409; send it again
-with the same `commandId`.
+the `actor` of the command. The service does not read the stream. It
+appends `ConversationStarted` and `OwnerMessagePosted` with
+`expectedVersion: 0`. If the stream exists (`ConcurrencyError`), it
+appends only `OwnerMessagePosted` with no version check. Both appends
+store the `commandId`, so a replay gives the first answer. Two appends
+to the same stream at the same time can give 409; send it again with the
+same `commandId`.
 
 ### `GET /internal/events`
 
@@ -190,9 +207,9 @@ prefix is `_INBOX_conversation-hub`, the durable consumer on
 `ORCHESTRATION` is `conversation-hub`, and the DLQ subjects are
 `dlq.conversation-hub.>`. These are the gitops grants (ADR 0023).
 
-NATS, the relay and the consumer are not readiness checks. When NATS is
-down, the service still takes messages, and the events wait in the
-outbox. A stuck relay shows in `outbox_oldest_pending_seconds`, a stuck
+NATS, the relay and the consumer are readiness checks, as in
+projections: the service is not ready while it cannot read
+`ORCHESTRATION` or publish to `CONVERSATION`. A stuck relay shows in `outbox_oldest_pending_seconds`, a stuck
 consumer in `consumer_oldest_held_seconds`. Put an alert on both. NATS
 must be available at start.
 
@@ -227,6 +244,15 @@ in `famashines/gitops`. It needs the org secret `GITOPS_TOKEN` with access
 to this repo, and the file
 `kubernetes/ai-systems/ai-systems-conversation-hub/prod/kustomization.yaml`
 in gitops. Neither is there yet (the deploy is task M2-09).
+
+## Deploy order
+
+conversation-hub must have a contracts version before orchestration
+sends an event type that is new in that version. The consumer reads all
+of `orchestration.>`, and an event that the contracts do not know fails
+the parse and goes to the DLQ. So: release contracts, then
+conversation-hub (and the other readers of `ORCHESTRATION`), then
+orchestration.
 
 ## Known limits
 

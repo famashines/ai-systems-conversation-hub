@@ -74,6 +74,9 @@ export async function start(config: Readonly<Config>, options: { drainDelayMs?: 
     routes: routes({ store, newId: randomUUID, threadTasks: threadTasks(mongo.db) }),
     readiness: {
       mongo: mongo.ready,
+      nats: nats.ready,
+      relay: relay.ready,
+      consumer: consumer.ready,
       migrations: async () =>
         (await mongo.db
           .collection<{ _id: string }>("migrations")

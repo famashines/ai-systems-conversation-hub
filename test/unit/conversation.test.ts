@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { RegisteredEvent } from "@famashines/ai-systems-contracts";
+import { ReplyText, type RegisteredEvent } from "@famashines/ai-systems-contracts";
 import {
   conversationStreamId,
   decide,
   evolve,
   initialState,
+  noReasonText,
+  replyText,
   replyTo,
   statusAfter,
   TaskNotInConversationError,
@@ -206,7 +208,7 @@ test("each orchestration event gives its reply text and task status", () => {
         reason: "The task has ended",
       }),
       { taskId: older, conversationId, text: "The task has ended" },
-      undefined,
+      "ended",
     ],
   ];
   for (const [event, reply, status] of cases) {
@@ -235,4 +237,27 @@ test("a conversation event never gives a reply or a status, so a reply cannot ma
     assert.equal(replyTo(event), undefined);
     assert.equal(statusAfter(event), undefined);
   }
+});
+
+test("a reason that is not a valid reply text gives a valid reply text", () => {
+  for (const [reason, text] of [
+    [" ", noReasonText],
+    ["\n\t", noReasonText],
+    ["\0", noReasonText],
+    [" \0 \n", noReasonText],
+    ["  The cap\0 is reached \n", "The cap is reached"],
+    ["Done", "Done"],
+  ] as const) {
+    assert.equal(replyText(reason), text, JSON.stringify(reason));
+  }
+  const reply = replyTo(
+    envelope("orchestration.RunFailed", {
+      taskId: older,
+      runId,
+      code: "internal",
+      reason: "\0 ",
+    }),
+  );
+  assert.equal(reply?.text, noReasonText);
+  assert.ok(ReplyText.safeParse(reply.text).success);
 });

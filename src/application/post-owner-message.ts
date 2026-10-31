@@ -3,12 +3,12 @@ import type {
   MessageIntent,
   PostOwnerMessageCommandPayloadV1,
 } from "@famashines/ai-systems-contracts";
-import type { EventStore } from "@famashines/ai-systems-kit/event-store";
+import { ConcurrencyError, type EventStore } from "@famashines/ai-systems-kit/event-store";
 import {
   conversationStreamId,
   decide,
-  evolve,
   initialState,
+  type ConversationEvent,
   type OwnerMessagePosted,
   type ThreadTask,
 } from "../domain/conversation.ts";
@@ -38,26 +38,34 @@ export async function postOwnerMessage(
 ): Promise<{ answer: PostOwnerMessageAnswer; replayed: boolean }> {
   const { conversationId } = payload;
   const streamId = conversationStreamId(conversationId);
-  const state = (await store.readStream(streamId)).reduce(evolve, initialState);
   const messageId = newId();
-  const events = decide(state, {
-    type: "PostOwnerMessage",
+  const command = {
+    type: "PostOwnerMessage" as const,
     messageId,
     ...payload,
     tasks: await threadTasks(conversationId),
-  });
-  const { intent, taskId } = (events.at(-1) as OwnerMessagePosted).payload;
+  };
+  const first = decide(initialState, command);
+  const { intent, taskId } = (first.at(-1) as OwnerMessagePosted).payload;
   const answer = { conversationId, messageId, intent, ...(taskId === undefined ? {} : { taskId }) };
-  const result = await store.append({
-    streamId,
-    ...(state.started ? {} : { expectedVersion: 0 }),
-    events: events.map((event) => ({
-      ...event,
-      correlationId: messageId,
-      causationId: commandId,
-      actor,
-    })),
-    command: { commandId, answer },
-  });
+  const append = (events: ConversationEvent[], expectedVersion?: number) =>
+    store.append({
+      streamId,
+      ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      events: events.map((event) => ({
+        ...event,
+        correlationId: messageId,
+        causationId: commandId,
+        actor,
+      })),
+      command: { commandId, answer },
+    });
+  let result;
+  try {
+    result = await append(first, 0);
+  } catch (error) {
+    if (!(error instanceof ConcurrencyError)) throw error;
+    result = await append(decide({ started: true }, command));
+  }
   return { answer: result.answer ?? answer, replayed: result.replayed };
 }

@@ -2,7 +2,7 @@ import type { RegisteredEvent } from "@famashines/ai-systems-contracts";
 import type { EventStore } from "@famashines/ai-systems-kit/event-store";
 import type { EventHandler } from "@famashines/ai-systems-kit/messaging";
 import type { Migration } from "@famashines/ai-systems-kit/mongo";
-import type { Db } from "mongodb";
+import type { ClientSession, Db } from "mongodb";
 import {
   conversationStreamId,
   replyTo,
@@ -44,22 +44,31 @@ export function orchestrationHandler(
   newId: () => string,
 ): EventHandler<RegisteredEvent> {
   const tasks = tasksOf(db);
-  return async (event, { markProcessed }) => {
+  const setStatus = (taskId: string, status: TaskStatus, session: ClientSession) =>
+    tasks.updateOne({ _id: taskId, status: { $ne: "ended" } }, { $set: { status } }, { session });
+  return async (event, { session, markProcessed }) => {
     if (event.type === "orchestration.TaskSubmitted") {
       const { taskId, conversationId } = event.payload;
       if (conversationId === undefined) return;
-      await tasks.updateOne(
-        { _id: taskId },
-        { $setOnInsert: { conversationId, submittedAt: event.occurredAt, status: "running" } },
-        { upsert: true },
-      );
+      await session.withTransaction(async () => {
+        await tasks.updateOne(
+          { _id: taskId },
+          { $setOnInsert: { conversationId, submittedAt: event.occurredAt, status: "running" } },
+          { upsert: true, session },
+        );
+        await markProcessed(session);
+      });
       return;
     }
     const status = statusAfter(event);
     const reply = replyTo(event);
     if (!reply) {
       if (status && "taskId" in event.payload) {
-        await tasks.updateOne({ _id: event.payload.taskId }, { $set: { status } });
+        const { taskId } = event.payload;
+        await session.withTransaction(async () => {
+          await setStatus(taskId, status, session);
+          await markProcessed(session);
+        });
       }
       return;
     }
@@ -87,7 +96,7 @@ export function orchestrationHandler(
         },
       ],
       also: async (session) => {
-        if (status) await tasks.updateOne({ _id: taskId }, { $set: { status } }, { session });
+        if (status) await setStatus(taskId, status, session);
         await markProcessed(session);
       },
     });

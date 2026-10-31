@@ -38,9 +38,12 @@ test
 - The consumer filter is `orchestration.>` and the consumer is `ordered`.
   The gitops grant pins the filter. Other event types are acked with no
   effect.
-- A handler effect and `markProcessed` are in one transaction (`also` of
-  `append`). An effect that is idempotent by itself (the `TaskSubmitted`
-  upsert, the `RunStarted` status) needs no marker.
+- Each handler effect and `markProcessed` are in one transaction (`also`
+  of `append`, or `session.withTransaction`). The task state `ended` is
+  terminal in the update filter. A replay of `ORCHESTRATION` changes
+  nothing.
+- Readers before writers: conversation-hub takes a new contracts version
+  before orchestration sends new event types (README "Deploy order").
 - Pass `parse: parseEvent` from contracts v0.3.0 to the store and the
   consumer.
 

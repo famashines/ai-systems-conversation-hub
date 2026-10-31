@@ -226,8 +226,10 @@ const publish = async (event: { eventId: string; type: string }, msgID = event.e
 const drained = async (): Promise<void> => {
   await waitFor(async () => {
     const { state } = await manager.streams.info("ORCHESTRATION");
-    const info = await manager.consumers.info("ORCHESTRATION", "conversation-hub");
-    return info.ack_floor.stream_seq === state.last_seq;
+    const info = await manager.consumers
+      .info("ORCHESTRATION", "conversation-hub")
+      .catch(() => null);
+    return info?.ack_floor.stream_seq === state.last_seq;
   });
 };
 
@@ -374,6 +376,27 @@ test("MessageRefused gives its reason as a reply in its thread", async () => {
     taskId,
     sourceEventId: refused.eventId,
   });
+  const task = await mongo.db.collection("tasks").findOne({ _id: taskId as never });
+  assert.equal(task?.status, "ended");
+  assert.equal((await post(conversationId)).intent, "new_task");
+});
+
+test("a reason with no text gives a fixed reply text", async () => {
+  const conversationId = randomUUID();
+  const first = await post(conversationId);
+  const taskId = await submitted(conversationId, first.messageId);
+  const failed = orchestrationEvent("orchestration.RunFailed", {
+    taskId,
+    runId: randomUUID(),
+    code: "internal",
+    reason: " \u0000 ",
+  });
+  await publish(failed);
+  await drained();
+  const [reply] = await replies(failed.eventId);
+  assert.equal(reply?.payload.text, "The run ended with no reason.");
+  const task = await mongo.db.collection("tasks").findOne({ _id: taskId as never });
+  assert.equal(task?.status, "ended");
 });
 
 test("a task that is not from the chat gives no reply", async () => {
@@ -391,6 +414,37 @@ test("a task that is not from the chat gives no reply", async () => {
   await drained();
   assert.equal((await replies(done.eventId)).length, 0);
   assert.equal(await mongo.db.collection("tasks").countDocuments({ _id: taskId as never }), 0);
+});
+
+test("a replay of ORCHESTRATION keeps ended tasks ended and makes no new reply", async () => {
+  const conversationId = randomUUID();
+  const first = await post(conversationId);
+  const taskId = await submitted(conversationId, first.messageId);
+  const runId = randomUUID();
+  await publish(orchestrationEvent("orchestration.RunStarted", { taskId, runId }));
+  await publish(
+    orchestrationEvent("orchestration.RunCompleted", {
+      taskId,
+      runId,
+      summary: "Done",
+      costMicroUsd: 0,
+    }),
+  );
+  await drained();
+  const tasks = mongo.db.collection<{ _id: string; status: string }>("tasks");
+  const before = await tasks.find().sort({ _id: 1 }).toArray();
+  const count = await events().countDocuments();
+  assert.equal((await tasks.findOne({ _id: taskId }))?.status, "ended");
+  await manager.consumers.delete("ORCHESTRATION", "conversation-hub");
+  await waitFor(
+    async () =>
+      (await manager.consumers.info("ORCHESTRATION", "conversation-hub").catch(() => null)) !==
+      null,
+  );
+  await drained();
+  assert.deepEqual(await tasks.find().sort({ _id: 1 }).toArray(), before);
+  assert.equal(await events().countDocuments(), count);
+  assert.equal((await post(conversationId)).intent, "new_task");
 });
 
 test("a reply never reaches orchestration: its consumer gets only owner messages", async () => {

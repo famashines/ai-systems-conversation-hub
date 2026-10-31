@@ -16,5 +16,10 @@
 - `GET /internal/events`: the replay API.
 - `/health`, `/ready` (MongoDB and migrations), `/metrics`.
 - Outbox relay to `CONVERSATION`, graceful shutdown.
+- Review fixes: task state changes have a `processed` marker and `ended`
+  is terminal, so a replay does not make an ended task `running` again.
+  `MessageRefused` marks its task `ended`. A reason with no text gives
+  a fixed reply text. Readiness has `nats`, `relay` and `consumer`. An
+  owner message does not read the stream. Deploy order in the README.
 - Container image, CI (gitleaks, verify, audit, integration, image) and
   the release workflow.
