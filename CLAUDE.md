@@ -19,7 +19,7 @@ Rules for all ai-systems repos: `ai-systems-docs/CLAUDE.md`
 
 ```
 src
-├── domain/conversation.ts             decide, evolve, intent rules, reply and status of an event; no I/O
+├── domain/conversation.ts             decide, intent rules, reply and status of an event; no I/O
 ├── application/post-owner-message.ts  the command handler
 ├── adapters/http.ts                   routes, zod schemas of the bodies and queries
 ├── adapters/orchestration.ts          the ORCHESTRATION handler, the tasks collection, 001-tasks

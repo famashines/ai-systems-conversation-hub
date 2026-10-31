@@ -4,8 +4,6 @@ import { ReplyText, type RegisteredEvent } from "@famashines/ai-systems-contract
 import {
   conversationStreamId,
   decide,
-  evolve,
-  initialState,
   noReasonText,
   replyText,
   replyTo,
@@ -47,8 +45,11 @@ const post = (
   ...message,
 });
 
-const given = (events: ConversationEvent[]) => ({
-  when: (command: PostOwnerMessage) => () => decide(events.reduce(evolve, initialState), command),
+const given = (tasks: ThreadTask[]) => ({
+  when:
+    (message: { taskId?: string; newTask?: boolean } = {}) =>
+    () =>
+      decide(post(tasks, message)),
 });
 
 const posted = (intent: Record<string, string>): ConversationEvent =>
@@ -58,19 +59,15 @@ const posted = (intent: Record<string, string>): ConversationEvent =>
     payload: { conversationId, messageId, text: "Make it shorter", ...intent },
   }) as ConversationEvent;
 
-test("given no events, when PostOwnerMessage, then ConversationStarted and OwnerMessagePosted new_task", () => {
-  assert.deepEqual(given([]).when(post([]))(), [started, posted({ intent: "new_task" })]);
-});
-
-test("given a started conversation, when PostOwnerMessage, then only OwnerMessagePosted", () => {
-  assert.deepEqual(given([started]).when(post([]))(), [posted({ intent: "new_task" })]);
+test("given no tasks, when PostOwnerMessage, then ConversationStarted and OwnerMessagePosted new_task", () => {
+  assert.deepEqual(given([]).when()(), [started, posted({ intent: "new_task" })]);
 });
 
 test("given a running task, when PostOwnerMessage with newTask, then new_task with no taskId", () => {
   const tasks = [task(older, "running", "2026-10-31T08:00:00.000Z")];
-  const events = given([started]).when(post(tasks, { newTask: true }))();
-  assert.deepEqual(events, [posted({ intent: "new_task" })]);
-  assert.equal(Object.hasOwn(events[0]?.payload ?? {}, "taskId"), false);
+  const events = given(tasks).when({ newTask: true })();
+  assert.deepEqual(events, [started, posted({ intent: "new_task" })]);
+  assert.equal(Object.hasOwn(events[1].payload, "taskId"), false);
 });
 
 test("given two running tasks, when PostOwnerMessage with no taskId, then steer the latest", () => {
@@ -79,17 +76,13 @@ test("given two running tasks, when PostOwnerMessage with no taskId, then steer 
     task(older, "running", "2026-10-31T08:00:00.000Z"),
     task(other, "blocked", "2026-10-31T10:00:00.000Z"),
   ];
-  assert.deepEqual(given([started]).when(post(tasks))(), [
-    posted({ intent: "steer", taskId: newer }),
-  ]);
+  assert.deepEqual(given(tasks).when()(), [started, posted({ intent: "steer", taskId: newer })]);
 });
 
 test("given two running tasks at the same time, when PostOwnerMessage, then steer the higher id", () => {
   const at = "2026-10-31T08:00:00.000Z";
   const tasks = [task(newer, "running", at), task(older, "running", at)];
-  assert.deepEqual(given([started]).when(post(tasks))(), [
-    posted({ intent: "steer", taskId: newer }),
-  ]);
+  assert.deepEqual(given(tasks).when()(), [started, posted({ intent: "steer", taskId: newer })]);
 });
 
 test("given only blocked and ended tasks, when PostOwnerMessage with no taskId, then new_task", () => {
@@ -97,7 +90,7 @@ test("given only blocked and ended tasks, when PostOwnerMessage with no taskId, 
     task(older, "blocked", "2026-10-31T08:00:00.000Z"),
     task(newer, "ended", "2026-10-31T09:00:00.000Z"),
   ];
-  assert.deepEqual(given([started]).when(post(tasks))(), [posted({ intent: "new_task" })]);
+  assert.deepEqual(given(tasks).when()(), [started, posted({ intent: "new_task" })]);
 });
 
 for (const status of ["running", "blocked"] as const) {
@@ -106,7 +99,8 @@ for (const status of ["running", "blocked"] as const) {
       task(older, status, "2026-10-31T08:00:00.000Z"),
       task(newer, "running", "2026-10-31T09:00:00.000Z"),
     ];
-    assert.deepEqual(given([started]).when(post(tasks, { taskId: older }))(), [
+    assert.deepEqual(given(tasks).when({ taskId: older })(), [
+      started,
       posted({ intent: "steer", taskId: older }),
     ]);
   });
@@ -117,25 +111,23 @@ test("given an ended task, when PostOwnerMessage with its taskId, then new_task"
     task(older, "ended", "2026-10-31T08:00:00.000Z"),
     task(newer, "running", "2026-10-31T09:00:00.000Z"),
   ];
-  assert.deepEqual(given([started]).when(post(tasks, { taskId: older }))(), [
+  assert.deepEqual(given(tasks).when({ taskId: older })(), [
+    started,
     posted({ intent: "new_task" }),
   ]);
 });
 
 test("given no task with the id, when PostOwnerMessage with a taskId, then TaskNotInConversationError", () => {
   const tasks = [task(older, "running", "2026-10-31T08:00:00.000Z")];
-  assert.throws(given([started]).when(post(tasks, { taskId: other })), TaskNotInConversationError);
-  assert.throws(given([]).when(post([], { taskId: other })), TaskNotInConversationError);
+  assert.throws(given(tasks).when({ taskId: other }), TaskNotInConversationError);
+  assert.throws(given([]).when({ taskId: other }), TaskNotInConversationError);
 });
 
 test("no rule gives the intent answer: contracts v0.3.0 has no event for a waiting task", () => {
   const statuses = ["running", "blocked", "ended"] as const;
   for (const status of statuses) {
     for (const message of [{}, { taskId: older }, { newTask: true }]) {
-      const [event] = given([started]).when(
-        post([task(older, status, "2026-10-31T08:00:00.000Z")], message),
-      )();
-      assert.ok(event?.type === "conversation.OwnerMessagePosted");
+      const [, event] = given([task(older, status, "2026-10-31T08:00:00.000Z")]).when(message)();
       assert.notEqual(event.payload.intent, "answer");
     }
   }
@@ -208,7 +200,7 @@ test("each orchestration event gives its reply text and task status", () => {
         reason: "The task has ended",
       }),
       { taskId: older, conversationId, text: "The task has ended" },
-      "ended",
+      undefined,
     ],
   ];
   for (const [event, reply, status] of cases) {
@@ -245,7 +237,7 @@ test("a reason that is not a valid reply text gives a valid reply text", () => {
     ["\n\t", noReasonText],
     ["\0", noReasonText],
     [" \0 \n", noReasonText],
-    ["  The cap\0 is reached \n", "The cap is reached"],
+    ["  The cap\0 is reached \n", "  The cap is reached \n"],
     ["Done", "Done"],
   ] as const) {
     assert.equal(replyText(reason), text, JSON.stringify(reason));
@@ -260,4 +252,5 @@ test("a reason that is not a valid reply text gives a valid reply text", () => {
   );
   assert.equal(reply?.text, noReasonText);
   assert.ok(ReplyText.safeParse(reply.text).success);
+  assert.equal(noReasonText, "No reason was given.");
 });

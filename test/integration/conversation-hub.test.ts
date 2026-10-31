@@ -355,7 +355,7 @@ test("a reply appears once after a redelivery of its source event", async () => 
   );
 });
 
-test("MessageRefused gives its reason as a reply in its thread", async () => {
+test("MessageRefused gives its reason as a reply and changes no task state", async () => {
   const conversationId = randomUUID();
   const first = await post(conversationId);
   const taskId = await submitted(conversationId, first.messageId);
@@ -377,8 +377,9 @@ test("MessageRefused gives its reason as a reply in its thread", async () => {
     sourceEventId: refused.eventId,
   });
   const task = await mongo.db.collection("tasks").findOne({ _id: taskId as never });
-  assert.equal(task?.status, "ended");
-  assert.equal((await post(conversationId)).intent, "new_task");
+  assert.equal(task?.status, "running");
+  const next = await post(conversationId);
+  assert.deepEqual(next, { conversationId, messageId: next.messageId, intent: "steer", taskId });
 });
 
 test("a reason with no text gives a fixed reply text", async () => {
@@ -394,7 +395,7 @@ test("a reason with no text gives a fixed reply text", async () => {
   await publish(failed);
   await drained();
   const [reply] = await replies(failed.eventId);
-  assert.equal(reply?.payload.text, "The run ended with no reason.");
+  assert.equal(reply?.payload.text, "No reason was given.");
   const task = await mongo.db.collection("tasks").findOne({ _id: taskId as never });
   assert.equal(task?.status, "ended");
 });

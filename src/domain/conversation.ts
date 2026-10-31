@@ -45,10 +45,6 @@ export interface AgentReplyPosted {
 
 export type ConversationEvent = ConversationStarted | OwnerMessagePosted | AgentReplyPosted;
 
-export interface ConversationState {
-  started: boolean;
-}
-
 export type Intent = { intent: "new_task" } | { intent: "steer"; taskId: string };
 
 export class TaskNotInConversationError extends Error {
@@ -57,8 +53,6 @@ export class TaskNotInConversationError extends Error {
     this.name = "TaskNotInConversationError";
   }
 }
-
-export const initialState: ConversationState = { started: false };
 
 export const conversationStreamId = (conversationId: string): string =>
   `conversation-${conversationId}`;
@@ -88,25 +82,16 @@ export function intentOf(
   return running ? { intent: "steer", taskId: running.taskId } : { intent: "new_task" };
 }
 
-export function decide(
-  state: ConversationState,
-  command: ConversationCommand,
-): ConversationEvent[] {
+export function decide(command: ConversationCommand): [ConversationStarted, OwnerMessagePosted] {
   const { conversationId, messageId, text } = command;
-  const posted: OwnerMessagePosted = {
-    type: "conversation.OwnerMessagePosted",
-    schemaVersion: 1,
-    payload: { conversationId, messageId, text, ...intentOf(command.tasks, command) },
-  };
-  if (state.started) return [posted];
   return [
     { type: "conversation.ConversationStarted", schemaVersion: 1, payload: { conversationId } },
-    posted,
+    {
+      type: "conversation.OwnerMessagePosted",
+      schemaVersion: 1,
+      payload: { conversationId, messageId, text, ...intentOf(command.tasks, command) },
+    },
   ];
-}
-
-export function evolve(state: ConversationState, event: { type: string }): ConversationState {
-  return event.type === "conversation.ConversationStarted" ? { started: true } : state;
 }
 
 export interface Reply {
@@ -116,9 +101,12 @@ export interface Reply {
   conversationId?: string;
 }
 
-export const noReasonText = "The run ended with no reason.";
+export const noReasonText = "No reason was given.";
 
-export const replyText = (text: string): string => text.replaceAll("\0", "").trim() || noReasonText;
+export function replyText(text: string): string {
+  const clean = text.replaceAll("\0", "");
+  return clean.trim() === "" ? noReasonText : clean;
+}
 
 export function replyTo(event: RegisteredEvent): Reply | undefined {
   const reply = rawReplyTo(event);
@@ -159,7 +147,6 @@ export function statusAfter(event: RegisteredEvent): TaskStatus | undefined {
       return "blocked";
     case "orchestration.RunCompleted":
     case "orchestration.RunFailed":
-    case "orchestration.MessageRefused":
       return "ended";
     default:
       return undefined;

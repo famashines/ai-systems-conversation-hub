@@ -7,9 +7,7 @@ import { ConcurrencyError, type EventStore } from "@famashines/ai-systems-kit/ev
 import {
   conversationStreamId,
   decide,
-  initialState,
   type ConversationEvent,
-  type OwnerMessagePosted,
   type ThreadTask,
 } from "../domain/conversation.ts";
 
@@ -45,8 +43,8 @@ export async function postOwnerMessage(
     ...payload,
     tasks: await threadTasks(conversationId),
   };
-  const first = decide(initialState, command);
-  const { intent, taskId } = (first.at(-1) as OwnerMessagePosted).payload;
+  const [started, posted] = decide(command);
+  const { intent, taskId } = posted.payload;
   const answer = { conversationId, messageId, intent, ...(taskId === undefined ? {} : { taskId }) };
   const append = (events: ConversationEvent[], expectedVersion?: number) =>
     store.append({
@@ -62,10 +60,10 @@ export async function postOwnerMessage(
     });
   let result;
   try {
-    result = await append(first, 0);
+    result = await append([started, posted], 0);
   } catch (error) {
     if (!(error instanceof ConcurrencyError)) throw error;
-    result = await append(decide({ started: true }, command));
+    result = await append([posted]);
   }
   return { answer: result.answer ?? answer, replayed: result.replayed };
 }

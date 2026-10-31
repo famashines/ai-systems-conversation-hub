@@ -51,16 +51,15 @@ collection `tasks`, from the orchestration events:
 | `RunStarted`                            | `running`  |
 | `RunBlocked`                            | `blocked`  |
 | `RunCompleted`, `RunFailed`             | `ended`    |
-| `MessageRefused`                        | `ended`    |
 
 `ended` is terminal: no later or replayed event changes it. Each state
 change and the kit `processed` marker of its event are in one MongoDB
 transaction, so a replay of `ORCHESTRATION` (for example after the
 durable consumer is made again) does not change the state.
 
-A chat task with no terminal event stays `running` until orchestration
-refuses a message for it. Then `MessageRefused` marks it `ended`, so it
-does not take the later messages with no `taskId`.
+`MessageRefused` changes no task state: orchestration can refuse a
+message for a task that is still live (for example a blocked task while
+the cap is still reached), and the owner must be able to resume it.
 
 A `TaskSubmitted` with no `conversationId` (a task from `POST /api/tasks`)
 is not a task of a thread. Its later events give no state and no reply.
@@ -94,10 +93,10 @@ comes in the thread as a reply.
 | `RunBlocked`        | `reason`   | yes     |
 | `MessageRefused`    | `reason`   | no      |
 
-The service removes NUL characters from the text and trims it. A `reason`
-can be valid and still give an empty text (for example `" "`). Then the
-reply text is `The run ended with no reason.`, so the reply is always a
-valid `ReplyText`.
+The service removes NUL characters from the text. A `reason` can be
+valid and still have no text that is not white space (for example
+`" "`). Then the reply text is `No reason was given.`, for all source
+events, so the reply is always a valid `ReplyText`.
 
 - The reply has `sourceEventId` (the orchestration `eventId`), a new
   `messageId`, `causationId` = the source event id, the `correlationId` of
@@ -164,9 +163,10 @@ the `actor` of the command. The service does not read the stream. It
 appends `ConversationStarted` and `OwnerMessagePosted` with
 `expectedVersion: 0`. If the stream exists (`ConcurrencyError`), it
 appends only `OwnerMessagePosted` with no version check. Both appends
-store the `commandId`, so a replay gives the first answer. Two appends
-to the same stream at the same time can give 409; send it again with the
-same `commandId`.
+store the `commandId`, so a replay gives the first answer. A 409 is
+possible only in a rare race: two appends to the same stream that get
+the same version in the same moment. Send the message again with the same
+`commandId`.
 
 ### `GET /internal/events`
 
@@ -262,6 +262,10 @@ orchestration.
 - A message that comes before conversation-hub has the `TaskSubmitted` of
   the first message gives `new_task`, not `steer`: the task id is not
   known yet.
+- A chat task with no terminal event stays `running`, and it takes the
+  later messages with no `taskId`. A refusal does not end it. So
+  orchestration (M2-06) must always end a task with `RunCompleted` or
+  `RunFailed`.
 - The decision reads `tasks` outside the append transaction. If a task
   ends between the read and the append, the message steers an ended task,
   and orchestration answers with `MessageRefused`.
