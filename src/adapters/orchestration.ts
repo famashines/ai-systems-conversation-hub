@@ -53,7 +53,7 @@ export function orchestrationHandler(
       await session.withTransaction(async () => {
         await tasks.updateOne(
           { _id: taskId },
-          { $setOnInsert: { conversationId, submittedAt: event.occurredAt, status: "running" } },
+          { $setOnInsert: { conversationId, submittedAt: event.occurredAt, status: "submitted" } },
           { upsert: true, session },
         );
         await markProcessed(session);

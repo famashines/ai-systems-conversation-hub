@@ -27,7 +27,7 @@ projections --GET /internal/events--> conversation-hub (rebuild only)
 
 Architecture and reasons: `ai-systems-docs` (`ARCHITECTURE.md` 3, 5 to 8,
 ADR 0006, 0007, 0021, 0023). Schemas: `@famashines/ai-systems-contracts`
-v0.3.0.
+v0.4.1.
 
 ## Events
 
@@ -43,14 +43,26 @@ first message to a new id starts the thread.
 ## Intent rules
 
 conversation-hub keeps the state of each task of a thread in the
-collection `tasks`, from the orchestration events:
+collection `tasks`, from the orchestration events. The states follow the
+status table of contracts v0.4.1 ("Tasks and plans"). All the end states
+(`completed`, `failed`, `cancelled`, `rejected`) are one state `ended`.
 
-| Orchestration event                     | Task state |
-| --------------------------------------- | ---------- |
-| `TaskSubmitted` with a `conversationId` | `running`  |
-| `RunStarted`                            | `running`  |
-| `RunBlocked`                            | `blocked`  |
-| `RunCompleted`, `RunFailed`             | `ended`    |
+| Orchestration event                         | Task state          |
+| ------------------------------------------- | ------------------- |
+| `TaskSubmitted` with a `conversationId`     | `submitted`         |
+| `ClarificationRequested`                    | `clarifying`        |
+| `ClarificationAnswered`                     | `planning`          |
+| `PlanProposed`, `awaitsApproval` true       | `awaiting_approval` |
+| `PlanProposed`, `awaitsApproval` false      | `planning`          |
+| `PlanEdited`                                | `awaiting_approval` |
+| `RunStarted`, `RunResumed`                  | `running`           |
+| `RunBlocked`                                | `blocked`           |
+| `RunCompleted`, `RunFailed`, `RunCancelled` | `ended`             |
+| `TaskCancelled`, `PlanRejected`             | `ended`             |
+
+The other events change no task state. `RunPaused` keeps `running`: the
+run exists, and a steer reaches the subtasks that have not started.
+`PlanApproved` keeps the state until `RunStarted`.
 
 `ended` is terminal: no later or replayed event changes it. Each state
 change and the kit `processed` marker of its event are in one MongoDB
@@ -66,37 +78,66 @@ is not a task of a thread. Its later events give no state and no reply.
 
 The rules, in this order:
 
-| Message                                      | Intent                                 |
-| -------------------------------------------- | -------------------------------------- |
-| `newTask: true`                              | `new_task` (no `taskId`)               |
-| `taskId` of a `running` or `blocked` task    | `steer` with that `taskId`             |
-| `taskId` of an `ended` task                  | `new_task`                             |
-| `taskId` that is not a task of the thread    | 409 `conflict`, no event               |
-| no `taskId`, the thread has a `running` task | `steer` with the latest `running` task |
-| no `taskId`, no `running` task               | `new_task`                             |
+| Message                                         | Intent                                     |
+| ----------------------------------------------- | ------------------------------------------ |
+| `newTask: true`                                 | `new_task` (no `taskId`)                   |
+| `taskId` of a `clarifying` task                 | `answer` with that `taskId`                |
+| `taskId` of an `ended` task                     | `new_task`                                 |
+| `taskId` of a task in another state             | `steer` with that `taskId`                 |
+| `taskId` that is not a task of the thread       | 409 `conflict`, no event                   |
+| no `taskId`, the thread has a `clarifying` task | `answer` with the latest `clarifying` task |
+| no `taskId`, the thread has a `running` task    | `steer` with the latest `running` task     |
+| no `taskId`, no `clarifying` or `running` task  | `new_task`                                 |
 
 The latest task is the one with the latest `TaskSubmitted` time. A
-`blocked` task is a `steer` target only when the owner replies to it with
-its `taskId`, so a blocked task does not take all later messages of the
-thread. The contract refuses `taskId` together with `newTask: true` (400).
+waiting `answer` comes before a `steer` (ARCHITECTURE 3), unless the
+owner replies to a different task with its `taskId`. A `blocked` task is
+a `steer` target only when the owner replies to it with its `taskId`, so
+a blocked task does not take all later messages of the thread. The
+contract refuses `taskId` together with `newTask: true`, and `taskId`
+together with `mode` (400).
+
+A steer comes only during a run, and it reaches only the subtasks that
+have not started. M3 has no re-plan. A reply with the `taskId` of a task
+that is `submitted`, `planning` or `awaiting_approval` is a `steer`, and
+orchestration refuses it with `MessageRefused`. So the owner sees why in
+the thread, and the message does not start a new task by mistake. To
+change a plan, the owner uses the plan commands (approve, edit, reject).
+
+`mode` (`auto` or `approval`) is copied into `OwnerMessagePosted` only
+for `new_task`. For `steer` and `answer` it is not sent. Absent means
+`approval` (orchestration decides).
 
 Orchestration checks the intent against its own task state. When it
-refuses a `steer`, it sends `orchestration.MessageRefused`, and the reason
-comes in the thread as a reply.
+refuses a `steer` or an `answer` (for example a steer on an ended task),
+it sends `orchestration.MessageRefused`, and the reason comes in the
+thread as a reply.
 
 ## Replies
 
-| Orchestration event | Reply text | `runId` |
-| ------------------- | ---------- | ------- |
-| `RunCompleted`      | `summary`  | yes     |
-| `RunFailed`         | `reason`   | yes     |
-| `RunBlocked`        | `reason`   | yes     |
-| `MessageRefused`    | `reason`   | no      |
+| Orchestration event      | Reply text                                                                                                                        | `runId` |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `ClarificationRequested` | `I need answers to these questions before I make a plan:` and the numbered questions                                              | no      |
+| `PlanProposed`           | `Plan version <n>, <m> subtasks:` and the numbered subtask titles; then `The plan waits for your approval.` when `awaitsApproval` | no      |
+| `RunCompleted`           | `summary`                                                                                                                         | yes     |
+| `RunFailed`              | `reason`                                                                                                                          | yes     |
+| `RunBlocked`             | `reason`, for all codes                                                                                                           | yes     |
+| `RunCancelled`           | `The run is cancelled.` and the `reason`, when there is one                                                                       | yes     |
+| `TaskCancelled`          | `The task is cancelled.` and the `reason`, when there is one                                                                      | no      |
+| `MessageRefused`         | `reason`                                                                                                                          | no      |
+
+Other events give no reply. `PlanRejected` gives no reply: the owner
+rejected the plan. The full plan, the outputs and the costs stay in
+orchestration and its read models (ARCHITECTURE 3).
 
 The service removes NUL characters from the text. A `reason` can be
 valid and still have no text that is not white space (for example
-`" "`). Then the reply text is `No reason was given.`, for all source
-events, so the reply is always a valid `ReplyText`.
+`" "`). Then the reply text is `No reason was given.` (or only the fixed
+cancel sentence), so the reply is always a valid `ReplyText`. Each reply
+fits in `ReplyText` (100000 characters): at most 5 questions of 1000
+characters, 20 subtask titles of 200 characters, a `summary` that is a
+`ReplyText`, and a `reason` of 1000 characters. A unit test checks the
+longest values.
 
 - The reply has `sourceEventId` (the orchestration `eventId`), a new
   `messageId`, `causationId` = the source event id, the `correlationId` of
@@ -170,6 +211,8 @@ body is a `CommandEnvelopeV1` with a
 - `type` must be `conversation.PostOwnerMessage`. `expectedVersion` is
   refused. `actor.kind` must be `owner`.
 - `taskId` is optional; `newTask` is `false` by default.
+- `mode` (`auto` or `approval`) is optional, and only for a message with
+  no `taskId`. It goes into the event only for `new_task`.
 
 | Status   | When                                                             | Body                                                                                                                                                                |
 | -------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -287,6 +330,19 @@ the parse and goes to the DLQ. So: release contracts, then
 conversation-hub (and the other readers of `ORCHESTRATION`), then
 orchestration.
 
+For contracts v0.4.1 (contracts CHANGELOG 0.4.1, deploy order):
+
+1. conversation-hub moves to v0.4.1 (this version) before orchestration
+   sends the new events (`ClarificationRequested`, `PlanProposed`,
+   `TaskCancelled`, `RunCancelled` and the others) or the new
+   `RunBlocked` codes (`forbidden`, `subtask_failed`). On v0.3.x they
+   fail the parse and go to the DLQ at once.
+2. conversation-hub and api-gateway move to v0.4.1 before the app sends
+   `mode`. On v0.3.x they strip it.
+
+This version works with the M2 orchestration: M2 sends `TaskSubmitted`
+and `RunStarted` in one append, so a chat task is `running` as before.
+
 api-gateway must forward the `Authorization` header of the owner on
 `POST /api/conversations/:id/messages` before this service checks the
 token (M2-17). Deploy that api-gateway first. Else each owner message
@@ -300,16 +356,18 @@ gets 401 here, and api-gateway gives 502.
 - The JWKS comes over plain HTTP inside the cluster (ARCHITECTURE 11.1,
   accepted).
 
-- The intent `answer` is not made. Contracts v0.3.0 has no event that
-  says a task waits for answers to clarifying questions. It comes with
-  the clarifying events (contracts v0.4.0, M3).
 - A message that comes before conversation-hub has the `TaskSubmitted` of
   the first message gives `new_task`, not `steer`: the task id is not
   known yet.
-- A chat task with no terminal event stays `running`, and it takes the
-  later messages with no `taskId`. A refusal does not end it. So
-  orchestration (M2-06) must always end a task with `RunCompleted` or
-  `RunFailed`.
+- A chat task with no terminal event stays in its state. A `running` or
+  `clarifying` task takes the later messages with no `taskId`. A refusal
+  does not end it. So orchestration must always end a task with
+  `RunCompleted`, `RunFailed`, `RunCancelled`, `TaskCancelled` or
+  `PlanRejected`.
+- A second message with no `taskId` after an answer, but before
+  `ClarificationAnswered` comes, is an `answer` too. Orchestration
+  refuses it when the task does not wait for an answer, and the reason
+  comes as a reply.
 - The decision reads `tasks` outside the append transaction. If a task
   ends between the read and the append, the message steers an ended task,
   and orchestration answers with `MessageRefused`.
