@@ -13,7 +13,7 @@ import {
 import { connectMongo, runMigrations } from "@famashines/ai-systems-kit/mongo";
 import { createLogger, startTelemetry } from "@famashines/ai-systems-kit/observability";
 import { z } from "zod";
-import { commandsNeedOwner, routes } from "./adapters/http.ts";
+import { routes } from "./adapters/http.ts";
 import { orchestrationHandler, tasksMigration, threadTasks } from "./adapters/orchestration.ts";
 
 export const service = "conversation-hub";
@@ -84,8 +84,7 @@ export async function start(config: Readonly<Config>, options: { drainDelayMs?: 
   });
   const app = createService({
     logger,
-    before: [commandsNeedOwner(verify)],
-    routes: routes({ store, newId: randomUUID, threadTasks: threadTasks(mongo.db) }),
+    routes: routes({ store, newId: randomUUID, threadTasks: threadTasks(mongo.db), verify }),
     readiness: {
       mongo: mongo.ready,
       nats: nats.ready,

@@ -128,12 +128,17 @@ Errors are RFC 9457 problem JSON with a `code` (`@famashines/ai-systems-kit/http
 
 A NetworkPolicy is L4: it limits pod and port, not the caller. So the
 service does not trust `actor.kind` `owner` in the body (ADR 0028,
-M2-17). A hook of `kit/auth` checks each request on
-`/internal/commands/*`: `Authorization: Bearer <access token>` with the
-role `owner`, issuer `OIDC_ISSUER`, audience `OIDC_AUDIENCE` and `exp`.
-The `actor.id` of the command must be the `sub` of the token. The hook
-is only on `/internal/commands/*`. The read and replay routes stay open
-to the callers that the network lets in.
+M2-17). The command handler checks the token first, with `bearerHook`
+of `kit/auth`, as budget does: `Authorization: Bearer <access token>`
+with the role `owner`, issuer `OIDC_ISSUER`, audience `OIDC_AUDIENCE` and
+`exp`. The check comes before the body is read, so a caller with no token
+gets 401 and no validation errors. The check is in the handler, not on a
+path prefix, so it also applies to a path with empty segments (for
+example `//internal/commands/post-owner-message`, which the kit router
+matches). Then the `actor.id` of the command must be the `sub` of the
+token. A new command route must call the same check. The read and replay
+routes have no check and stay open to the callers that the network lets
+in.
 
 | Caller      | Paths                                   | Token                    |
 | ----------- | --------------------------------------- | ------------------------ |
@@ -166,16 +171,16 @@ body is a `CommandEnvelopeV1` with a
   refused. `actor.kind` must be `owner`.
 - `taskId` is optional; `newTask` is `false` by default.
 
-| Status   | When                                                             | Body                                             |
-| -------- | ---------------------------------------------------------------- | ------------------------------------------------ |
-| 201      | A new message                                                    | `{ conversationId, messageId, intent, taskId? }` |
-| 200      | The same `commandId` came before                                 | The first answer again. No new event.            |
-| 400      | The body is not valid                                            | Problem JSON with `errors` (paths, never values) |
-| 401      | No token, or a token that is not valid                           | Problem JSON                                     |
-| 403      | No `owner` role, or `actor.id` is not the `sub` of the token     | Problem JSON                                     |
-| 409      | The `taskId` is not a task of the thread, or a concurrent append | Problem JSON, `code` `conflict`                  |
-| 413, 415 | The body is too large, or not JSON                               | Problem JSON                                     |
-| 503      | MongoDB does not answer in 5 s, or Keycloak cannot be read       | Problem JSON, `code` `unavailable`, no detail    |
+| Status   | When                                                             | Body                                                                                                                                                                |
+| -------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 201      | A new message                                                    | `{ conversationId, messageId, intent, taskId? }`                                                                                                                    |
+| 200      | The same `commandId` came before                                 | The first answer again. No new event.                                                                                                                               |
+| 400      | The body is not valid                                            | Problem JSON with `errors` (paths, never values)                                                                                                                    |
+| 401      | No token, or a token that is not valid                           | Problem JSON                                                                                                                                                        |
+| 403      | No `owner` role, or `actor.id` is not the `sub` of the token     | Problem JSON                                                                                                                                                        |
+| 409      | The `taskId` is not a task of the thread, or a concurrent append | Problem JSON, `code` `conflict`                                                                                                                                     |
+| 413, 415 | The body is too large, or not JSON                               | Problem JSON                                                                                                                                                        |
+| 503      | MongoDB does not answer in 5 s, or Keycloak cannot be read       | Problem JSON, `code` `unavailable`, with a fixed `detail`: `The database is not available` or `The keys of the identity provider are not available`. No host names. |
 
 The service makes the `messageId` (UUID v4). The events have
 `correlationId` = the `messageId`, `causationId` = the `commandId`, and

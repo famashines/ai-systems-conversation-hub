@@ -4,7 +4,7 @@ import type { JwtVerifier } from "@famashines/ai-systems-kit/auth";
 import { createService, ForbiddenError, UnauthorizedError } from "@famashines/ai-systems-kit/http";
 import { createLogger } from "@famashines/ai-systems-kit/observability";
 import { createMemoryEventStore, fakeClock, fakeIds } from "@famashines/ai-systems-kit/testing";
-import { commandsNeedOwner, routes } from "../../src/adapters/http.ts";
+import { routes } from "../../src/adapters/http.ts";
 import type { ThreadTask } from "../../src/domain/conversation.ts";
 
 const clock = fakeClock();
@@ -19,11 +19,11 @@ const verify: JwtVerifier = (token) =>
   (tokens[token] ?? (() => Promise.reject(new UnauthorizedError())))(token);
 const app = createService({
   logger: createLogger({ service: "conversation-hub", release: "test", level: "silent" }),
-  before: [commandsNeedOwner(verify)],
   routes: routes({
     store,
     newId: messageIds,
     threadTasks: (conversationId) => Promise.resolve(tasks.get(conversationId) ?? []),
+    verify,
   }),
   drainDelayMs: 0,
 });
@@ -151,6 +151,25 @@ test("no token or a bad token gives 401, a token with no owner role gives 403", 
     code: "forbidden",
   });
   assert.equal((await store.readStream(`conversation-${conversationId}`)).length, 0);
+});
+
+test("no token gives 401 before the body is read, also on a path with empty segments", async () => {
+  const count = (await store.readAll({ limit: 1000 })).length;
+  for (const path of [
+    "/internal/commands/post-owner-message",
+    "//internal/commands/post-owner-message",
+    "/internal//commands/post-owner-message",
+  ]) {
+    for (const body of ["{}", "not json", JSON.stringify(envelope({ conversationId: ids() }))]) {
+      const response = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      assert.deepEqual(await problem(response), { status: 401, code: "unauthorized" }, path);
+    }
+  }
+  assert.equal((await store.readAll({ limit: 1000 })).length, count);
 });
 
 test("an actor that is not the subject of the token gives 403", async () => {

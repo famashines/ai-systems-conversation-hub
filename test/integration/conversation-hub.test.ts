@@ -308,6 +308,17 @@ test("a post needs an owner token signed by the JWKS key; the replay API needs n
   assert.equal((await send(conversationId, {})).status, 401);
   assert.equal((await send(conversationId, {}, "Bearer abc.def.ghi")).status, 401);
   assert.equal((await send(conversationId, {}, `Bearer ${await token([])}`)).status, 403);
+  for (const path of [
+    "//internal/commands/post-owner-message",
+    "/internal//commands/post-owner-message",
+  ]) {
+    const response = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(response.status, 401, path);
+  }
   assert.equal(await events().countDocuments({ "payload.conversationId": conversationId }), 0);
   assert.equal((await fetch(`${base}/internal/events`)).status, 200);
 });
