@@ -1,7 +1,9 @@
 import type {
   AgentReplyPostedEventPayloadV1,
   ConversationStartedEventPayloadV1,
+  ModelId,
   OwnerMessagePostedEventPayloadV1,
+  ReasoningEffort,
   RegisteredEvent,
   TaskMode,
 } from "@famashines/ai-systems-contracts";
@@ -23,6 +25,8 @@ export interface PostOwnerMessage {
   taskId?: string;
   newTask: boolean;
   mode?: TaskMode;
+  model?: ModelId;
+  effort?: ReasoningEffort;
   tasks: readonly ThreadTask[];
 }
 
@@ -89,7 +93,7 @@ export function intentOf(
 }
 
 export function decide(command: ConversationCommand): [ConversationStarted, OwnerMessagePosted] {
-  const { conversationId, messageId, text, mode } = command;
+  const { conversationId, messageId, text, mode, model, effort } = command;
   const intent = intentOf(command.tasks, command);
   return [
     { type: "conversation.ConversationStarted", schemaVersion: 1, payload: { conversationId } },
@@ -97,8 +101,16 @@ export function decide(command: ConversationCommand): [ConversationStarted, Owne
       type: "conversation.OwnerMessagePosted",
       schemaVersion: 1,
       payload:
-        intent.intent === "new_task" && mode !== undefined
-          ? { conversationId, messageId, text, ...intent, mode }
+        intent.intent === "new_task"
+          ? {
+              conversationId,
+              messageId,
+              text,
+              ...intent,
+              ...(mode === undefined ? {} : { mode }),
+              ...(model === undefined ? {} : { model }),
+              ...(effort === undefined ? {} : { effort }),
+            }
           : { conversationId, messageId, text, ...intent },
     },
   ];

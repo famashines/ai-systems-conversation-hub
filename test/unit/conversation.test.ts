@@ -34,7 +34,13 @@ const started: ConversationEvent = {
   payload: { conversationId },
 };
 
-type Message = { taskId?: string; newTask?: boolean; mode?: "auto" | "approval" };
+type Message = {
+  taskId?: string;
+  newTask?: boolean;
+  mode?: "auto" | "approval";
+  model?: string;
+  effort?: "high" | "none";
+};
 
 const post = (tasks: ThreadTask[], message: Message = {}): PostOwnerMessage => ({
   type: "PostOwnerMessage",
@@ -196,6 +202,30 @@ test("the mode goes into OwnerMessagePosted only for new_task", () => {
   }
   const [, plain] = given([]).when()();
   assert.equal(Object.hasOwn(plain.payload, "mode"), false);
+});
+
+test("the model and the effort go into OwnerMessagePosted only for new_task", () => {
+  const model = "anthropic/claude-opus-4.8";
+  assert.deepEqual(given([]).when({ model, effort: "high" })(), [
+    started,
+    posted({ intent: "new_task", model, effort: "high" }),
+  ]);
+  assert.deepEqual(given([]).when({ mode: "auto", model })(), [
+    started,
+    posted({ intent: "new_task", mode: "auto", model }),
+  ]);
+  for (const status of ["running", "clarifying"] as const) {
+    const [, event] = given([task(older, status, "2026-10-31T08:00:00.000Z")]).when({
+      model,
+      effort: "none",
+    })();
+    assert.notEqual(event.payload.intent, "new_task");
+    assert.equal(Object.hasOwn(event.payload, "model"), false, status);
+    assert.equal(Object.hasOwn(event.payload, "effort"), false, status);
+  }
+  const [, plain] = given([]).when()();
+  assert.equal(Object.hasOwn(plain.payload, "model"), false);
+  assert.equal(Object.hasOwn(plain.payload, "effort"), false);
 });
 
 test("the stream id is conversation-<conversationId>", () => {

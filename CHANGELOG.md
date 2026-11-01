@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Contracts v0.5.0. `model` and `effort` of `PostOwnerMessage` go into
+  `OwnerMessagePosted` for `new_task` only, as `mode` does. With no
+  `taskId`, a `steer` or `answer` intent drops them. A message with a
+  `taskId` and a `mode`, `model` or `effort` gets 400 with the error
+  path `taskId` (was `mode`). An `effort` with no `model` gets 400.
+- Deploy: this version goes before the api-gateway on v0.5.0 (contracts
+  CHANGELOG 0.5.0, step 2).
 - Contracts v0.4.1 (M3-10). The task state follows the v0.4.1 status
   table: `submitted`, `clarifying`, `planning`, `awaiting_approval`,
   `running`, `blocked`, `ended`. `RunCancelled`, `TaskCancelled` and

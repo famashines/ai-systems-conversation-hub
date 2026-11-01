@@ -27,7 +27,7 @@ projections --GET /internal/events--> conversation-hub (rebuild only)
 
 Architecture and reasons: `ai-systems-docs` (`ARCHITECTURE.md` 3, 5 to 8,
 ADR 0006, 0007, 0021, 0023). Schemas: `@famashines/ai-systems-contracts`
-v0.4.1.
+v0.5.0.
 
 ## Events
 
@@ -44,7 +44,7 @@ first message to a new id starts the thread.
 
 conversation-hub keeps the state of each task of a thread in the
 collection `tasks`, from the orchestration events. The states follow the
-status table of contracts v0.4.1 ("Tasks and plans"). All the end states
+status table of contracts v0.5.0 ("Tasks and plans"). All the end states
 (`completed`, `failed`, `cancelled`, `rejected`) are one state `ended`.
 
 | Orchestration event                         | Task state          |
@@ -94,8 +94,9 @@ waiting `answer` comes before a `steer` (ARCHITECTURE 3), unless the
 owner replies to a different task with its `taskId`. A `blocked` task is
 a `steer` target only when the owner replies to it with its `taskId`, so
 a blocked task does not take all later messages of the thread. The
-contract refuses `taskId` together with `newTask: true`, and `taskId`
-together with `mode` (400).
+contract refuses `taskId` together with `newTask: true`, `taskId`
+together with `mode`, `model` or `effort`, and `effort` with no `model`
+(400).
 
 A steer comes only during a run, and it reaches only the subtasks that
 have not started. M3 has no re-plan. A reply with the `taskId` of a task
@@ -104,9 +105,11 @@ orchestration refuses it with `MessageRefused`. So the owner sees why in
 the thread, and the message does not start a new task by mistake. To
 change a plan, the owner uses the plan commands (approve, edit, reject).
 
-`mode` (`auto` or `approval`) is copied into `OwnerMessagePosted` only
-for `new_task`. For `steer` and `answer` it is not sent. Absent means
-`approval` (orchestration decides).
+`mode` (`auto` or `approval`), `model` and `effort` are copied into
+`OwnerMessagePosted` only for `new_task`. For `steer` and `answer` they
+are not sent: a message with no `taskId` that gives `steer` or `answer`
+loses them with no error. Absent `mode` means `approval`. Absent `model`
+and `effort` mean auto (orchestration decides).
 
 Orchestration checks the intent against its own task state. When it
 refuses a `steer` or an `answer` (for example a steer on an ended task),
@@ -211,8 +214,11 @@ body is a `CommandEnvelopeV1` with a
 - `type` must be `conversation.PostOwnerMessage`. `expectedVersion` is
   refused. `actor.kind` must be `owner`.
 - `taskId` is optional; `newTask` is `false` by default.
-- `mode` (`auto` or `approval`) is optional, and only for a message with
-  no `taskId`. It goes into the event only for `new_task`.
+- `mode` (`auto` or `approval`), `model` (a model id) and `effort` (a
+  `ReasoningEffort`) are optional, and only for a message with no
+  `taskId` (else 400, error path `taskId`). `effort` comes only with
+  `model` (else 400, error path `effort`). They go into the event only
+  for `new_task`.
 
 | Status   | When                                                             | Body                                                                                                                                                                |
 | -------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -330,9 +336,18 @@ the parse and goes to the DLQ. So: release contracts, then
 conversation-hub (and the other readers of `ORCHESTRATION`), then
 orchestration.
 
+For contracts v0.5.0 (contracts CHANGELOG 0.5.0, deploy order):
+
+1. ai-proxy moves to v0.5.0 first.
+2. conversation-hub moves to v0.5.0 (this version) before api-gateway.
+   On v0.4.1 conversation-hub strips `model` and `effort` from a message,
+   and it cannot decode a `CallRequested` with `maxTokens` above 16384:
+   the consumer sends that event to the DLQ.
+3. api-gateway moves to v0.5.0, then the app sends `model` and `effort`.
+
 For contracts v0.4.1 (contracts CHANGELOG 0.4.1, deploy order):
 
-1. conversation-hub moves to v0.4.1 (this version) before orchestration
+1. conversation-hub moves to v0.4.1 before orchestration
    sends the new events (`ClarificationRequested`, `PlanProposed`,
    `TaskCancelled`, `RunCancelled` and the others) or the new
    `RunBlocked` codes (`forbidden`, `subtask_failed`). On v0.3.x they
