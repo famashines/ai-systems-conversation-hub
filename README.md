@@ -81,10 +81,10 @@ The rules, in this order:
 | Message                                         | Intent                                     |
 | ----------------------------------------------- | ------------------------------------------ |
 | `newTask: true`                                 | `new_task` (no `taskId`)                   |
+| `taskId` that is not a task of the thread       | 409 `conflict`, no event                   |
 | `taskId` of a `clarifying` task                 | `answer` with that `taskId`                |
 | `taskId` of an `ended` task                     | `new_task`                                 |
 | `taskId` of a task in another state             | `steer` with that `taskId`                 |
-| `taskId` that is not a task of the thread       | 409 `conflict`, no event                   |
 | no `taskId`, the thread has a `clarifying` task | `answer` with the latest `clarifying` task |
 | no `taskId`, the thread has a `running` task    | `steer` with the latest `running` task     |
 | no `taskId`, no `clarifying` or `running` task  | `new_task`                                 |
