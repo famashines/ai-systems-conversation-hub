@@ -1,17 +1,25 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { createService } from "@famashines/ai-systems-kit/http";
+import type { JwtVerifier } from "@famashines/ai-systems-kit/auth";
+import { createService, ForbiddenError, UnauthorizedError } from "@famashines/ai-systems-kit/http";
 import { createLogger } from "@famashines/ai-systems-kit/observability";
 import { createMemoryEventStore, fakeClock, fakeIds } from "@famashines/ai-systems-kit/testing";
-import { routes } from "../../src/adapters/http.ts";
+import { commandsNeedOwner, routes } from "../../src/adapters/http.ts";
 import type { ThreadTask } from "../../src/domain/conversation.ts";
 
 const clock = fakeClock();
 const store = createMemoryEventStore({ now: clock.now, newId: fakeIds(1) });
 const messageIds = fakeIds(2);
 const tasks = new Map<string, ThreadTask[]>();
+const tokens: Record<string, JwtVerifier> = {
+  owner: () => Promise.resolve({ sub: "owner-1", roles: ["owner"], exp: 0 }),
+  guest: () => Promise.reject(new ForbiddenError("The role is missing")),
+};
+const verify: JwtVerifier = (token) =>
+  (tokens[token] ?? (() => Promise.reject(new UnauthorizedError())))(token);
 const app = createService({
   logger: createLogger({ service: "conversation-hub", release: "test", level: "silent" }),
+  before: [commandsNeedOwner(verify)],
   routes: routes({
     store,
     newId: messageIds,
@@ -41,12 +49,20 @@ const envelope = (payload: Record<string, unknown>, overrides: Record<string, un
   ...overrides,
 });
 
-const send = (body: unknown) =>
+const send = (body: unknown, authorization: string | null = "Bearer owner") =>
   fetch(`${base}/internal/commands/post-owner-message`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(authorization === null ? {} : { authorization }),
+    },
     body: JSON.stringify(body),
   });
+
+const problem = async (response: Response) => ({
+  status: response.status,
+  code: ((await response.json()) as { code: string }).code,
+});
 
 const answerOf = async (response: Response) =>
   (await response.json()) as { conversationId: string; messageId: string; intent: string };
@@ -119,6 +135,35 @@ test("a taskId that is not in the thread gives 409", async () => {
   assert.equal(response.status, 409);
   assert.equal(response.headers.get("content-type"), "application/problem+json");
   assert.equal(((await response.json()) as { code: string }).code, "conflict");
+});
+
+test("no token or a bad token gives 401, a token with no owner role gives 403", async () => {
+  const conversationId = ids();
+  const body = envelope({ conversationId });
+  for (const authorization of [null, "Bearer bad", "Basic YTpi"]) {
+    assert.deepEqual(await problem(await send(body, authorization)), {
+      status: 401,
+      code: "unauthorized",
+    });
+  }
+  assert.deepEqual(await problem(await send(body, "Bearer guest")), {
+    status: 403,
+    code: "forbidden",
+  });
+  assert.equal((await store.readStream(`conversation-${conversationId}`)).length, 0);
+});
+
+test("an actor that is not the subject of the token gives 403", async () => {
+  const conversationId = ids();
+  const body = envelope({ conversationId }, { actor: { kind: "owner", id: "owner-2" } });
+  assert.deepEqual(await problem(await send(body)), { status: 403, code: "forbidden" });
+  assert.equal((await store.readStream(`conversation-${conversationId}`)).length, 0);
+});
+
+test("the replay API, health and ready need no token", async () => {
+  for (const path of ["/internal/events", "/health", "/ready"]) {
+    assert.equal((await fetch(`${base}${path}`)).status, 200, path);
+  }
 });
 
 const conversationId = "00000000-0000-4000-8000-0000000000c1";

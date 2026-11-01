@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { parseEvent, type RegisteredEvent } from "@famashines/ai-systems-contracts";
 import { jetstream, jetstreamManager, type JetStreamManager } from "@nats-io/jetstream";
+import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { loadConfig } from "@famashines/ai-systems-kit/config";
 import {
   connectNats,
@@ -91,6 +94,9 @@ accounts {
 `;
 
 const logger = createLogger({ service: "test", release: "test", level: "silent" });
+const issuer = "https://auth.example.test/realms/ai-systems";
+let jwks: Server;
+let privateKey: CryptoKey;
 let mongoContainer: Started;
 let natsContainer: Started;
 let mongo: Mongo;
@@ -103,11 +109,30 @@ let running: Awaited<ReturnType<typeof start>> | undefined;
 let base = "";
 const seenByOrchestration: RegisteredEvent[] = [];
 
+const token = (roles = ["owner"]) =>
+  new SignJWT({ typ: "Bearer", azp: "ai-systems-app", realm_access: { roles } })
+    .setProtectedHeader({ alg: "RS256", kid: "k1" })
+    .setIssuer(issuer)
+    .setAudience("ai-systems-app")
+    .setSubject("owner-1")
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(privateKey);
+
 before(async () => {
   [mongoContainer, natsContainer] = await Promise.all([
     startMongo(),
     startNats({ config: natsConfig }),
   ]);
+  const pair = await generateKeyPair("RS256", { extractable: true });
+  privateKey = pair.privateKey;
+  const jwk = { ...(await exportJWK(pair.publicKey)), kid: "k1", alg: "RS256", use: "sig" };
+  jwks = createServer((_request, response) => {
+    response
+      .writeHead(200, { "content-type": "application/json" })
+      .end(JSON.stringify({ keys: [jwk] }));
+  });
+  await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
   mongo = await connectMongo({ url: mongoContainer.url, database: "conversation_hub" });
   orchestrationMongo = await connectMongo({ url: mongoContainer.url, database: "orchestration" });
   await runMigrations(orchestrationMongo.db, [processedMigration]);
@@ -146,6 +171,8 @@ before(async () => {
     NATS_SERVERS: natsContainer.url,
     NATS_USER: "ai-systems-conversation-hub",
     NATS_PASSWORD: "hub",
+    OIDC_ISSUER: issuer,
+    OIDC_JWKS_URL: `http://127.0.0.1:${String((jwks.address() as AddressInfo).port)}/certs`,
     LOG_LEVEL: "silent",
   });
   running = await start({ ...config, PORT: 0 }, { drainDelayMs: 0 });
@@ -161,6 +188,7 @@ after(async () => {
   await admin.close();
   await mongo.close();
   await orchestrationMongo.close();
+  await new Promise((resolve) => jwks.close(resolve));
   await Promise.all([mongoContainer.stop(), natsContainer.stop()]);
 });
 
@@ -179,13 +207,17 @@ interface Answer {
   taskId?: string;
 }
 
-const post = async (
+const send = (
   conversationId: string,
-  message: { text?: string; taskId?: string; newTask?: boolean } = {},
-): Promise<Answer> => {
-  const response = await fetch(`${base}/internal/commands/post-owner-message`, {
+  message: { text?: string; taskId?: string; newTask?: boolean },
+  authorization?: string,
+) =>
+  fetch(`${base}/internal/commands/post-owner-message`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(authorization === undefined ? {} : { authorization }),
+    },
     body: JSON.stringify({
       commandId: randomUUID(),
       type: "conversation.PostOwnerMessage",
@@ -193,6 +225,12 @@ const post = async (
       payload: { conversationId, text: "Write a poem", ...message },
     }),
   });
+
+const post = async (
+  conversationId: string,
+  message: { text?: string; taskId?: string; newTask?: boolean } = {},
+): Promise<Answer> => {
+  const response = await send(conversationId, message, `Bearer ${await token()}`);
   assert.equal(response.status, 201);
   return (await response.json()) as Answer;
 };
@@ -264,6 +302,15 @@ const streamMessages = async (eventId: string) => {
 
 const published = (eventId: string) =>
   waitFor(async () => (await events().findOne({ _id: eventId }))?.publishedAt != null);
+
+test("a post needs an owner token signed by the JWKS key; the replay API needs none", async () => {
+  const conversationId = randomUUID();
+  assert.equal((await send(conversationId, {})).status, 401);
+  assert.equal((await send(conversationId, {}, "Bearer abc.def.ghi")).status, 401);
+  assert.equal((await send(conversationId, {}, `Bearer ${await token([])}`)).status, 403);
+  assert.equal(await events().countDocuments({ "payload.conversationId": conversationId }), 0);
+  assert.equal((await fetch(`${base}/internal/events`)).status, 200);
+});
 
 test("the first message starts the thread and reaches CONVERSATION once", async () => {
   const conversationId = randomUUID();
