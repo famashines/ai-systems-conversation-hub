@@ -119,10 +119,14 @@ test("a message while a task runs gives steer with its taskId", async () => {
   });
 });
 
-test("a new task keeps its mode; a message for a clarifying task gives answer", async () => {
+test("a new task keeps its mode, model and effort; a message for a clarifying task gives answer", async () => {
   const conversationId = ids();
   const taskId = ids();
-  const first = await answerOf(await send(envelope({ conversationId, mode: "auto" })));
+  const first = await answerOf(
+    await send(
+      envelope({ conversationId, mode: "auto", model: "openai/gpt-5", effort: "minimal" }),
+    ),
+  );
   tasks.set(conversationId, [
     { taskId, status: "clarifying", submittedAt: clock.now().toISOString() },
   ]);
@@ -145,6 +149,8 @@ test("a new task keeps its mode; a message for a clarifying task gives answer", 
         text: "Write a poem",
         intent: "new_task",
         mode: "auto",
+        model: "openai/gpt-5",
+        effort: "minimal",
       },
       { conversationId, messageId: answer.messageId, text: "For kids", intent: "answer", taskId },
     ],
@@ -238,7 +244,32 @@ for (const [name, body, path] of [
   [
     "a taskId with a mode",
     envelope({ conversationId, taskId: "00000000-0000-4000-8000-0000000000c2", mode: "auto" }),
-    "body.payload.mode",
+    "body.payload.taskId",
+  ],
+  [
+    "a taskId with a model",
+    envelope({
+      conversationId,
+      taskId: "00000000-0000-4000-8000-0000000000c2",
+      model: "openai/gpt-5",
+    }),
+    "body.payload.taskId",
+  ],
+  [
+    "a taskId with a model and an effort",
+    envelope({
+      conversationId,
+      taskId: "00000000-0000-4000-8000-0000000000c2",
+      model: "openai/gpt-5",
+      effort: "high",
+    }),
+    "body.payload.taskId",
+  ],
+  ["an effort with no model", envelope({ conversationId, effort: "high" }), "body.payload.effort"],
+  [
+    "a bad effort",
+    envelope({ conversationId, model: "openai/gpt-5", effort: "huge" }),
+    "body.payload.effort",
   ],
   ["a bad mode", envelope({ conversationId, mode: "fast" }), "body.payload.mode"],
   [

@@ -44,7 +44,7 @@ test
   nothing.
 - Readers before writers: conversation-hub takes a new contracts version
   before orchestration sends new event types (README "Deploy order").
-- Pass `parse: parseEvent` from contracts v0.4.1 to the store and the
+- Pass `parse: parseEvent` from contracts v0.5.0 to the store and the
   consumer.
 
 ## Coverage gates (ADR 0017)
@@ -68,7 +68,7 @@ gitops. Wait with `waitFor`, never with a fixed sleep. The CI job
 - Kit and contracts come from git tags. A new tag needs a new
   `allowScripts` entry with the commit of the tag
   (`npm install-scripts approve <package>`). The kit asks for contracts
-  v0.1.0, and npm dedupes it to the v0.4.1 copy of this service. Check
+  v0.1.0, and npm dedupes it to the v0.5.0 copy of this service. Check
   with `npm ls @famashines/ai-systems-contracts`.
 - `mongodb` and `zod` have the exact versions that the kit pins. Check
   with `npm ls zod mongodb`.
