@@ -10,7 +10,6 @@ import {
   UnavailableError,
   validate,
   type Handler,
-  type Hook,
   type Route,
 } from "@famashines/ai-systems-kit/http";
 import { isInfrastructure } from "@famashines/ai-systems-kit/messaging";
@@ -48,17 +47,18 @@ const guard =
     }
   };
 
-export const commandsNeedOwner = (verify: JwtVerifier): Hook => {
-  const owner = bearerHook(verify);
-  return (request) => (request.path.startsWith("/internal/commands/") ? owner(request) : undefined);
-};
+export interface HttpDeps extends Deps {
+  verify: JwtVerifier;
+}
 
-export function routes(deps: Deps): Route[] {
+export function routes({ verify, ...deps }: HttpDeps): Route[] {
+  const owner = bearerHook(verify);
   return [
     {
       method: "POST",
       path: "/internal/commands/post-owner-message",
       handler: guard(async (request) => {
+        await owner(request);
         const { body } = await validate(request, { body: PostOwnerMessageBody });
         if (body.actor.id !== subjectOf(request).sub) {
           throw new ForbiddenError("The actor is not the subject of the token");
