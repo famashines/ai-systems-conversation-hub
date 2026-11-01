@@ -231,7 +231,8 @@ prefix is `_INBOX_conversation-hub`, the durable consumer on
 `dlq.conversation-hub.>`. These are the gitops grants (ADR 0023).
 
 Deploy: set `OIDC_JWKS_URL` to the Keycloak service inside the cluster,
-and add a NetworkPolicy egress from conversation-hub to Keycloak (port 8080) for the JWKS, as for budget. Keycloak is not a readiness check:
+and add a NetworkPolicy egress from conversation-hub to Keycloak on port
+8080 for the JWKS, as for budget. Keycloak is not a readiness check:
 when the JWKS cannot be read, a command gets 503.
 
 NATS, the relay and the consumer are readiness checks, as in
