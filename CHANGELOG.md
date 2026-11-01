@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Contracts v0.4.1 (M3-10). The task state follows the v0.4.1 status
+  table: `submitted`, `clarifying`, `planning`, `awaiting_approval`,
+  `running`, `blocked`, `ended`. `RunCancelled`, `TaskCancelled` and
+  `PlanRejected` end a task. `RunResumed` gives `running` again.
+- Intent `answer`: a message for a `clarifying` task (an open
+  `ClarificationRequested`). With no `taskId`, a waiting answer comes
+  before a steer. A `taskId` of a task before its run gives `steer`, and
+  orchestration refuses it with `MessageRefused`.
+- `mode` of `PostOwnerMessage` goes into `OwnerMessagePosted` for
+  `new_task` only.
+- New replies: `ClarificationRequested` (the questions), `PlanProposed`
+  (the subtask titles, and the approval note when `awaitsApproval`),
+  `RunCancelled` and `TaskCancelled`. `RunBlocked` gives a reply for all
+  codes, also `forbidden` and `subtask_failed`.
+- Deploy: this version goes before the orchestration that sends the new
+  events (README "Deploy order").
 - `/internal/commands/*` needs an owner bearer token (M2-17, ADR 0028).
   The command handler checks the token with `bearerHook` of `kit/auth`
   before it reads the body, as budget does: role `owner`, issuer,

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ReplyText, type RegisteredEvent } from "@famashines/ai-systems-contracts";
 import {
+  approvalNote,
   conversationStreamId,
   decide,
   noReasonText,
+  questionsIntro,
   replyText,
   replyTo,
   statusAfter,
@@ -32,10 +34,9 @@ const started: ConversationEvent = {
   payload: { conversationId },
 };
 
-const post = (
-  tasks: ThreadTask[],
-  message: { taskId?: string; newTask?: boolean } = {},
-): PostOwnerMessage => ({
+type Message = { taskId?: string; newTask?: boolean; mode?: "auto" | "approval" };
+
+const post = (tasks: ThreadTask[], message: Message = {}): PostOwnerMessage => ({
   type: "PostOwnerMessage",
   conversationId,
   messageId,
@@ -47,7 +48,7 @@ const post = (
 
 const given = (tasks: ThreadTask[]) => ({
   when:
-    (message: { taskId?: string; newTask?: boolean } = {}) =>
+    (message: Message = {}) =>
     () =>
       decide(post(tasks, message)),
 });
@@ -123,14 +124,78 @@ test("given no task with the id, when PostOwnerMessage with a taskId, then TaskN
   assert.throws(given([]).when({ taskId: other }), TaskNotInConversationError);
 });
 
-test("no rule gives the intent answer: contracts v0.3.0 has no event for a waiting task", () => {
-  const statuses = ["running", "blocked", "ended"] as const;
-  for (const status of statuses) {
-    for (const message of [{}, { taskId: older }, { newTask: true }]) {
-      const [, event] = given([task(older, status, "2026-10-31T08:00:00.000Z")]).when(message)();
-      assert.notEqual(event.payload.intent, "answer");
-    }
+for (const status of ["submitted", "planning", "awaiting_approval"] as const) {
+  test(`given a ${status} task, when PostOwnerMessage with no taskId, then new_task`, () => {
+    const tasks = [task(older, status, "2026-10-31T08:00:00.000Z")];
+    assert.deepEqual(given(tasks).when()(), [started, posted({ intent: "new_task" })]);
+  });
+
+  test(`given a ${status} task, when PostOwnerMessage with its taskId, then steer, which orchestration refuses before a run`, () => {
+    const tasks = [task(older, status, "2026-10-31T08:00:00.000Z")];
+    assert.deepEqual(given(tasks).when({ taskId: older })(), [
+      started,
+      posted({ intent: "steer", taskId: older }),
+    ]);
+  });
+}
+
+test("given a clarifying task, when PostOwnerMessage with its taskId, then answer that task", () => {
+  const tasks = [
+    task(older, "clarifying", "2026-10-31T08:00:00.000Z"),
+    task(newer, "clarifying", "2026-10-31T09:00:00.000Z"),
+  ];
+  assert.deepEqual(given(tasks).when({ taskId: older })(), [
+    started,
+    posted({ intent: "answer", taskId: older }),
+  ]);
+});
+
+test("given a clarifying and a later running task, when PostOwnerMessage with no taskId, then answer the clarifying task", () => {
+  const tasks = [
+    task(older, "clarifying", "2026-10-31T08:00:00.000Z"),
+    task(newer, "running", "2026-10-31T09:00:00.000Z"),
+  ];
+  assert.deepEqual(given(tasks).when()(), [started, posted({ intent: "answer", taskId: older })]);
+});
+
+test("given two clarifying tasks, when PostOwnerMessage with no taskId, then answer the latest", () => {
+  const tasks = [
+    task(newer, "clarifying", "2026-10-31T09:00:00.000Z"),
+    task(older, "clarifying", "2026-10-31T08:00:00.000Z"),
+  ];
+  assert.deepEqual(given(tasks).when()(), [started, posted({ intent: "answer", taskId: newer })]);
+});
+
+test("given a clarifying task, when PostOwnerMessage with the taskId of a running task, then steer the running task", () => {
+  const tasks = [
+    task(older, "running", "2026-10-31T08:00:00.000Z"),
+    task(newer, "clarifying", "2026-10-31T09:00:00.000Z"),
+  ];
+  assert.deepEqual(given(tasks).when({ taskId: older })(), [
+    started,
+    posted({ intent: "steer", taskId: older }),
+  ]);
+});
+
+test("the mode goes into OwnerMessagePosted only for new_task", () => {
+  assert.deepEqual(given([]).when({ mode: "auto" })(), [
+    started,
+    posted({ intent: "new_task", mode: "auto" }),
+  ]);
+  const running = [task(older, "running", "2026-10-31T08:00:00.000Z")];
+  assert.deepEqual(given(running).when({ newTask: true, mode: "approval" })(), [
+    started,
+    posted({ intent: "new_task", mode: "approval" }),
+  ]);
+  for (const status of ["running", "clarifying"] as const) {
+    const [, event] = given([task(older, status, "2026-10-31T08:00:00.000Z")]).when({
+      mode: "auto",
+    })();
+    assert.notEqual(event.payload.intent, "new_task");
+    assert.equal(Object.hasOwn(event.payload, "mode"), false, status);
   }
+  const [, plain] = given([]).when()();
+  assert.equal(Object.hasOwn(plain.payload, "mode"), false);
 });
 
 test("the stream id is conversation-<conversationId>", () => {
@@ -153,6 +218,22 @@ const envelope = (type: string, payload: Record<string, unknown>) =>
 
 const runId = "00000000-0000-4000-8000-0000000000b1";
 
+const subtask = (subtaskId: string, title: string) => ({
+  subtaskId,
+  title,
+  instructions: "Do it",
+  agentId: other,
+  dependsOn: [],
+  needsApproval: false,
+});
+
+const plan = [
+  subtask("00000000-0000-4000-8000-0000000000c1", "Find sources"),
+  subtask("00000000-0000-4000-8000-0000000000c2", "Write the draft"),
+];
+
+const planText = "Plan version 2, 2 subtasks:\n\n1. Find sources\n2. Write the draft";
+
 test("each orchestration event gives its reply text and task status", () => {
   const cases: [RegisteredEvent, ReturnType<typeof replyTo>, ReturnType<typeof statusAfter>][] = [
     [
@@ -160,7 +241,88 @@ test("each orchestration event gives its reply text and task status", () => {
       undefined,
       undefined,
     ],
+    [
+      envelope("orchestration.ClarificationRequested", {
+        taskId: older,
+        questions: ["Who reads it?", "How long?"],
+      }),
+      { taskId: older, text: `${questionsIntro}\n\n1. Who reads it?\n2. How long?` },
+      "clarifying",
+    ],
+    [
+      envelope("orchestration.ClarificationAnswered", {
+        taskId: older,
+        conversationId,
+        messageId,
+        text: "Kids, short",
+      }),
+      undefined,
+      "planning",
+    ],
+    [
+      envelope("orchestration.PlanProposed", {
+        taskId: older,
+        planVersion: 2,
+        subtasks: plan,
+        awaitsApproval: true,
+      }),
+      { taskId: older, text: `${planText}\n\n${approvalNote}` },
+      "awaiting_approval",
+    ],
+    [
+      envelope("orchestration.PlanProposed", {
+        taskId: older,
+        planVersion: 2,
+        subtasks: plan,
+        awaitsApproval: false,
+      }),
+      { taskId: older, text: planText },
+      "planning",
+    ],
+    [
+      envelope("orchestration.PlanProposed", {
+        taskId: older,
+        planVersion: 1,
+        subtasks: plan.slice(0, 1),
+        awaitsApproval: false,
+      }),
+      { taskId: older, text: "Plan version 1, 1 subtask:\n\n1. Find sources" },
+      "planning",
+    ],
+    [
+      envelope("orchestration.PlanEdited", { taskId: older, planVersion: 3, subtasks: plan }),
+      undefined,
+      "awaiting_approval",
+    ],
+    [
+      envelope("orchestration.PlanApproved", { taskId: older, planVersion: 3 }),
+      undefined,
+      undefined,
+    ],
+    [
+      envelope("orchestration.PlanRejected", { taskId: older, planVersion: 3, reason: "Too much" }),
+      undefined,
+      "ended",
+    ],
     [envelope("orchestration.RunStarted", { taskId: older, runId }), undefined, "running"],
+    [envelope("orchestration.RunPaused", { taskId: older, runId }), undefined, undefined],
+    [envelope("orchestration.RunResumed", { taskId: older, runId }), undefined, "running"],
+    [
+      envelope("orchestration.SteeringMessageAdded", {
+        taskId: older,
+        runId,
+        conversationId,
+        messageId,
+        text: "Shorter",
+      }),
+      undefined,
+      undefined,
+    ],
+    [
+      envelope("orchestration.TaskModeChanged", { taskId: older, mode: "auto" }),
+      undefined,
+      undefined,
+    ],
     [
       envelope("orchestration.RunCompleted", {
         taskId: older,
@@ -181,31 +343,89 @@ test("each orchestration event gives its reply text and task status", () => {
       { taskId: older, runId, text: "The model gave no text" },
       "ended",
     ],
+    ...(["budget_refused", "runaway_stopped", "forbidden", "subtask_failed"] as const).map(
+      (code): [RegisteredEvent, ReturnType<typeof replyTo>, ReturnType<typeof statusAfter>] => [
+        envelope("orchestration.RunBlocked", {
+          taskId: older,
+          runId,
+          code,
+          reason: `Blocked: ${code}`,
+        }),
+        { taskId: older, runId, text: `Blocked: ${code}` },
+        "blocked",
+      ],
+    ),
     [
-      envelope("orchestration.RunBlocked", {
-        taskId: older,
-        runId,
-        code: "budget_refused",
-        reason: "Monthly cap reached",
-      }),
-      { taskId: older, runId, text: "Monthly cap reached" },
-      "blocked",
+      envelope("orchestration.RunCancelled", { taskId: older, runId }),
+      { taskId: older, runId, text: "The run is cancelled." },
+      "ended",
     ],
     [
-      envelope("orchestration.MessageRefused", {
-        taskId: older,
-        conversationId,
-        messageId,
-        intent: "steer",
-        reason: "The task has ended",
-      }),
-      { taskId: older, conversationId, text: "The task has ended" },
-      undefined,
+      envelope("orchestration.RunCancelled", { taskId: older, runId, reason: "Not needed" }),
+      { taskId: older, runId, text: "The run is cancelled. Not needed" },
+      "ended",
     ],
+    [
+      envelope("orchestration.TaskCancelled", { taskId: older }),
+      { taskId: older, text: "The task is cancelled." },
+      "ended",
+    ],
+    [
+      envelope("orchestration.TaskCancelled", { taskId: older, reason: " \0 " }),
+      { taskId: older, text: "The task is cancelled." },
+      "ended",
+    ],
+    [
+      envelope("orchestration.TaskCancelled", { taskId: older, reason: "Wrong\0 task" }),
+      { taskId: older, text: "The task is cancelled. Wrong task" },
+      "ended",
+    ],
+    ...(["steer", "answer"] as const).map(
+      (intent): [RegisteredEvent, ReturnType<typeof replyTo>, ReturnType<typeof statusAfter>] => [
+        envelope("orchestration.MessageRefused", {
+          taskId: older,
+          conversationId,
+          messageId,
+          intent,
+          reason: "The task has ended",
+        }),
+        { taskId: older, conversationId, text: "The task has ended" },
+        undefined,
+      ],
+    ),
   ];
   for (const [event, reply, status] of cases) {
     assert.deepEqual(replyTo(event), reply, event.type);
     assert.equal(statusAfter(event), status, event.type);
+    if (reply) assert.ok(ReplyText.safeParse(reply.text).success, event.type);
+  }
+});
+
+test("the longest questions, plan and summary give a valid reply text", () => {
+  const long = (length: number) => "x".repeat(length);
+  const events = [
+    envelope("orchestration.ClarificationRequested", {
+      taskId: older,
+      questions: Array.from({ length: 5 }, () => long(1000)),
+    }),
+    envelope("orchestration.PlanProposed", {
+      taskId: older,
+      planVersion: 999999,
+      subtasks: Array.from({ length: 20 }, (_, index) =>
+        subtask(`00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, long(200)),
+      ),
+      awaitsApproval: true,
+    }),
+    envelope("orchestration.RunCompleted", {
+      taskId: older,
+      runId,
+      summary: long(100000),
+      costMicroUsd: 0,
+    }),
+    envelope("orchestration.RunCancelled", { taskId: older, runId, reason: long(1000) }),
+  ];
+  for (const event of events) {
+    assert.ok(ReplyText.safeParse(replyTo(event)?.text).success, event.type);
   }
 });
 

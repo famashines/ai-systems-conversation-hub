@@ -200,6 +200,13 @@ const events = () =>
     payload: Record<string, unknown>;
   }>("events");
 
+interface Message {
+  text?: string;
+  taskId?: string;
+  newTask?: boolean;
+  mode?: string;
+}
+
 interface Answer {
   conversationId: string;
   messageId: string;
@@ -207,11 +214,7 @@ interface Answer {
   taskId?: string;
 }
 
-const send = (
-  conversationId: string,
-  message: { text?: string; taskId?: string; newTask?: boolean },
-  authorization?: string,
-) =>
+const send = (conversationId: string, message: Message, authorization?: string) =>
   fetch(`${base}/internal/commands/post-owner-message`, {
     method: "POST",
     headers: {
@@ -226,10 +229,7 @@ const send = (
     }),
   });
 
-const post = async (
-  conversationId: string,
-  message: { text?: string; taskId?: string; newTask?: boolean } = {},
-): Promise<Answer> => {
+const post = async (conversationId: string, message: Message = {}): Promise<Answer> => {
   const response = await send(conversationId, message, `Bearer ${await token()}`);
   assert.equal(response.status, 201);
   return (await response.json()) as Answer;
@@ -347,11 +347,14 @@ test("the intent follows the task state that comes from orchestration events", a
   const first = await post(conversationId);
   const taskId = await submitted(conversationId, first.messageId);
   await drained();
+  assert.equal((await post(conversationId)).intent, "new_task");
+  assert.equal((await post(conversationId, { taskId })).intent, "steer");
+  const runId = randomUUID();
+  await publish(orchestrationEvent("orchestration.RunStarted", { taskId, runId }));
+  await drained();
   const steer = await post(conversationId, { text: "Shorter" });
   assert.deepEqual(steer, { conversationId, messageId: steer.messageId, intent: "steer", taskId });
   assert.equal((await post(conversationId, { newTask: true })).intent, "new_task");
-  const runId = randomUUID();
-  await publish(orchestrationEvent("orchestration.RunStarted", { taskId, runId }));
   const blocked = orchestrationEvent("orchestration.RunBlocked", {
     taskId,
     runId,
@@ -383,6 +386,135 @@ test("the intent follows the task state that comes from orchestration events", a
     sourceEventId: blocked.eventId,
   });
   assert.equal(doneReply?.payload.text, "Here is the poem");
+});
+
+const replyOf = async (event: { eventId: string }) => {
+  const found = await replies(event.eventId);
+  assert.equal(found.length, 1, event.eventId);
+  return found[0]?.payload;
+};
+
+const statusOf = async (taskId: string) =>
+  (await mongo.db.collection<{ _id: string; status: string }>("tasks").findOne({ _id: taskId }))
+    ?.status;
+
+test("questions, an answer, a plan, a steer and a cancel go through the thread", async () => {
+  const conversationId = randomUUID();
+  const first = await post(conversationId, { mode: "approval" });
+  const ownerEvent = await events().findOne({
+    type: "conversation.OwnerMessagePosted",
+    "payload.messageId": first.messageId,
+  });
+  assert.equal(ownerEvent?.payload.mode, "approval");
+  const taskId = await submitted(conversationId, first.messageId);
+  const asked = orchestrationEvent("orchestration.ClarificationRequested", {
+    taskId,
+    questions: ["Who reads it?", "How long?"],
+  });
+  await publish(asked);
+  await drained();
+  assert.equal(await statusOf(taskId), "clarifying");
+  const askedReply = await replyOf(asked);
+  assert.deepEqual(askedReply, {
+    conversationId,
+    messageId: askedReply?.messageId,
+    text: "I need answers to these questions before I make a plan:\n\n1. Who reads it?\n2. How long?",
+    taskId,
+    sourceEventId: asked.eventId,
+  });
+  const answer = await post(conversationId, { text: "Kids, four lines" });
+  assert.deepEqual(answer, {
+    conversationId,
+    messageId: answer.messageId,
+    intent: "answer",
+    taskId,
+  });
+  await publish(
+    orchestrationEvent("orchestration.ClarificationAnswered", {
+      taskId,
+      conversationId,
+      messageId: answer.messageId,
+      text: "Kids, four lines",
+    }),
+  );
+  await drained();
+  assert.equal(await statusOf(taskId), "planning");
+  assert.equal((await post(conversationId)).intent, "new_task");
+  const proposed = orchestrationEvent("orchestration.PlanProposed", {
+    taskId,
+    planVersion: 1,
+    subtasks: [
+      {
+        subtaskId: randomUUID(),
+        title: "Write the poem",
+        instructions: "Four lines for kids",
+        agentId: randomUUID(),
+        dependsOn: [],
+        needsApproval: false,
+      },
+    ],
+    awaitsApproval: true,
+  });
+  await publish(proposed);
+  await drained();
+  assert.equal(await statusOf(taskId), "awaiting_approval");
+  assert.equal(
+    (await replyOf(proposed))?.text,
+    "Plan version 1, 1 subtask:\n\n1. Write the poem\n\nThe plan waits for your approval.",
+  );
+  const runId = randomUUID();
+  await publish(orchestrationEvent("orchestration.PlanApproved", { taskId, planVersion: 1 }));
+  await publish(orchestrationEvent("orchestration.RunStarted", { taskId, runId }));
+  await drained();
+  const steer = await post(conversationId, { text: "Make it rhyme" });
+  assert.deepEqual(steer, { conversationId, messageId: steer.messageId, intent: "steer", taskId });
+  const cancelled = orchestrationEvent("orchestration.RunCancelled", { taskId, runId });
+  await publish(cancelled);
+  await drained();
+  assert.equal(await statusOf(taskId), "ended");
+  const cancelReply = await replyOf(cancelled);
+  assert.equal(cancelReply?.text, "The run is cancelled.");
+  assert.equal(cancelReply.runId, runId);
+  assert.equal((await post(conversationId, { taskId })).intent, "new_task");
+  const refused = orchestrationEvent("orchestration.MessageRefused", {
+    taskId,
+    conversationId,
+    messageId: steer.messageId,
+    intent: "steer",
+    reason: "The task has ended. Send a new task.",
+  });
+  await publish(refused);
+  await drained();
+  assert.equal((await replyOf(refused))?.text, "The task has ended. Send a new task.");
+  assert.equal(await statusOf(taskId), "ended");
+});
+
+test("TaskCancelled ends a task with a reply; RunBlocked subtask_failed gives its reason", async () => {
+  const conversationId = randomUUID();
+  const first = await post(conversationId);
+  const taskId = await submitted(conversationId, first.messageId);
+  const cancelled = orchestrationEvent("orchestration.TaskCancelled", {
+    taskId,
+    reason: "Not needed",
+  });
+  await publish(cancelled);
+  const second = await post(conversationId, { newTask: true });
+  const otherTask = await submitted(conversationId, second.messageId);
+  const runId = randomUUID();
+  await publish(orchestrationEvent("orchestration.RunStarted", { taskId: otherTask, runId }));
+  const blocked = orchestrationEvent("orchestration.RunBlocked", {
+    taskId: otherTask,
+    runId,
+    code: "subtask_failed",
+    reason: "The subtask Write failed 3 times",
+  });
+  await publish(blocked);
+  await drained();
+  assert.equal(await statusOf(taskId), "ended");
+  assert.equal((await replyOf(cancelled))?.text, "The task is cancelled. Not needed");
+  assert.equal(await statusOf(otherTask), "blocked");
+  assert.equal((await replyOf(blocked))?.text, "The subtask Write failed 3 times");
+  assert.equal(await events().countDocuments({ "payload.sourceEventId": blocked.eventId }), 1);
 });
 
 test("a reply appears once after a redelivery of its source event", async () => {
@@ -417,6 +549,7 @@ test("MessageRefused gives its reason as a reply and changes no task state", asy
   const conversationId = randomUUID();
   const first = await post(conversationId);
   const taskId = await submitted(conversationId, first.messageId);
+  await publish(orchestrationEvent("orchestration.RunStarted", { taskId, runId: randomUUID() }));
   const refused = orchestrationEvent("orchestration.MessageRefused", {
     taskId,
     conversationId,

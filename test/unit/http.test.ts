@@ -119,6 +119,38 @@ test("a message while a task runs gives steer with its taskId", async () => {
   });
 });
 
+test("a new task keeps its mode; a message for a clarifying task gives answer", async () => {
+  const conversationId = ids();
+  const taskId = ids();
+  const first = await answerOf(await send(envelope({ conversationId, mode: "auto" })));
+  tasks.set(conversationId, [
+    { taskId, status: "clarifying", submittedAt: clock.now().toISOString() },
+  ]);
+  const response = await send(envelope({ conversationId, text: "For kids" }));
+  assert.equal(response.status, 201);
+  const answer = await answerOf(response);
+  assert.deepEqual(answer, {
+    conversationId,
+    messageId: answer.messageId,
+    intent: "answer",
+    taskId,
+  });
+  const stream = await store.readStream(`conversation-${conversationId}`);
+  assert.deepEqual(
+    stream.slice(1).map((event) => event.payload),
+    [
+      {
+        conversationId,
+        messageId: first.messageId,
+        text: "Write a poem",
+        intent: "new_task",
+        mode: "auto",
+      },
+      { conversationId, messageId: answer.messageId, text: "For kids", intent: "answer", taskId },
+    ],
+  );
+});
+
 test("the same commandId gives 200 with the same answer and no new event", async () => {
   const command = envelope({ conversationId: ids() });
   const first = await send(command);
@@ -203,6 +235,12 @@ for (const [name, body, path] of [
     envelope({ conversationId, taskId: "00000000-0000-4000-8000-0000000000c2", newTask: true }),
     "body.payload.taskId",
   ],
+  [
+    "a taskId with a mode",
+    envelope({ conversationId, taskId: "00000000-0000-4000-8000-0000000000c2", mode: "auto" }),
+    "body.payload.mode",
+  ],
+  ["a bad mode", envelope({ conversationId, mode: "fast" }), "body.payload.mode"],
   [
     "a newTask that is not a boolean",
     envelope({ conversationId, newTask: "yes" }),
