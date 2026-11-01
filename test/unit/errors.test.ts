@@ -3,7 +3,7 @@ import { after, before, test } from "node:test";
 import { ConflictError, createService, UnavailableError } from "@famashines/ai-systems-kit/http";
 import { createLogger } from "@famashines/ai-systems-kit/observability";
 import { MongoNetworkError, MongoServerSelectionError } from "mongodb";
-import { routes, toHttpError } from "../../src/adapters/http.ts";
+import { commandsNeedOwner, routes, toHttpError } from "../../src/adapters/http.ts";
 import { TaskNotInConversationError } from "../../src/domain/conversation.ts";
 
 const down = (): Promise<never> =>
@@ -11,6 +11,7 @@ const down = (): Promise<never> =>
 
 const app = createService({
   logger: createLogger({ service: "conversation-hub", release: "test", level: "silent" }),
+  before: [commandsNeedOwner(() => Promise.resolve({ sub: "owner-1", roles: ["owner"], exp: 0 }))],
   routes: routes({
     store: { append: down, readStream: down, readAll: down },
     newId: () => "00000000-0000-4000-8000-000000000001",
@@ -40,7 +41,7 @@ test("PostOwnerMessage gives 503 with no detail when MongoDB is down", async () 
   await expectUnavailable(
     await fetch(`${base}/internal/commands/post-owner-message`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: "Bearer owner" },
       body: JSON.stringify({
         commandId: "00000000-0000-4000-8000-000000000002",
         type: "conversation.PostOwnerMessage",

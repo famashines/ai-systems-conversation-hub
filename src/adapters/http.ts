@@ -3,11 +3,14 @@ import {
   CommandEnvelopeV1,
   PostOwnerMessageCommandPayloadV1,
 } from "@famashines/ai-systems-contracts";
+import { bearerHook, subjectOf, type JwtVerifier } from "@famashines/ai-systems-kit/auth";
 import {
   ConflictError,
+  ForbiddenError,
   UnavailableError,
   validate,
   type Handler,
+  type Hook,
   type Route,
 } from "@famashines/ai-systems-kit/http";
 import { isInfrastructure } from "@famashines/ai-systems-kit/messaging";
@@ -45,6 +48,11 @@ const guard =
     }
   };
 
+export const commandsNeedOwner = (verify: JwtVerifier): Hook => {
+  const owner = bearerHook(verify);
+  return (request) => (request.path.startsWith("/internal/commands/") ? owner(request) : undefined);
+};
+
 export function routes(deps: Deps): Route[] {
   return [
     {
@@ -52,6 +60,9 @@ export function routes(deps: Deps): Route[] {
       path: "/internal/commands/post-owner-message",
       handler: guard(async (request) => {
         const { body } = await validate(request, { body: PostOwnerMessageBody });
+        if (body.actor.id !== subjectOf(request).sub) {
+          throw new ForbiddenError("The actor is not the subject of the token");
+        }
         const { answer, replayed } = await postOwnerMessage(deps, body);
         return { status: replayed ? 200 : 201, body: answer };
       }),

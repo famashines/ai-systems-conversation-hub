@@ -116,24 +116,42 @@ events, so the reply is always a valid `ReplyText`.
 
 | Method | Path                                           | Does                                                                                                                                                                                                                            |
 | ------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/internal/commands/post-owner-message`        | Post an owner message                                                                                                                                                                                                           |
-| GET    | `/internal/events?afterPosition=<n>&limit=<m>` | Replay API: all events in position order                                                                                                                                                                                        |
+| POST   | `/internal/commands/post-owner-message`        | Post an owner message. Needs an owner bearer token.                                                                                                                                                                             |
+| GET    | `/internal/events?afterPosition=<n>&limit=<m>` | Replay API: all events in position order. No token.                                                                                                                                                                             |
 | GET    | `/health`                                      | Liveness: 200 while the process runs                                                                                                                                                                                            |
 | GET    | `/ready`                                       | Readiness: 200 when MongoDB and NATS answer, the migrations are done, the relay sees `CONVERSATION` and the consumer exists, else 503 with the names of the failing checks (`mongo`, `nats`, `relay`, `consumer`, `migrations`) |
 | GET    | `/metrics`                                     | Prometheus metrics                                                                                                                                                                                                              |
 
 Errors are RFC 9457 problem JSON with a `code` (`@famashines/ai-systems-kit/http`).
 
+### Callers and trust
+
+A NetworkPolicy is L4: it limits pod and port, not the caller. So the
+service does not trust `actor.kind` `owner` in the body (ADR 0028,
+M2-17). A hook of `kit/auth` checks each request on
+`/internal/commands/*`: `Authorization: Bearer <access token>` with the
+role `owner`, issuer `OIDC_ISSUER`, audience `OIDC_AUDIENCE` and `exp`.
+The `actor.id` of the command must be the `sub` of the token. The hook
+is only on `/internal/commands/*`. The read and replay routes stay open
+to the callers that the network lets in.
+
+| Caller      | Paths                                   | Token                    |
+| ----------- | --------------------------------------- | ------------------------ |
+| api-gateway | `/internal/commands/post-owner-message` | Forwards the owner token |
+| projections | `/internal/events`                      | None                     |
+| Prometheus  | `/metrics`                              | None                     |
+
 ### `POST /internal/commands/post-owner-message`
 
-The body is a `CommandEnvelopeV1` with a
+The request needs an owner bearer token (see "Callers and trust"). The
+body is a `CommandEnvelopeV1` with a
 `PostOwnerMessageCommandPayloadV1`:
 
 ```json
 {
   "commandId": "6f1c2b9e-1d1a-4c55-9b0e-3a7f0d5e8c21",
   "type": "conversation.PostOwnerMessage",
-  "actor": { "kind": "owner", "id": "<owner id>" },
+  "actor": { "kind": "owner", "id": "<sub of the token>" },
   "payload": {
     "conversationId": "0b6f9c1e-6a43-4d2b-8f3e-2b8f1a9d7c10",
     "text": "Write a poem",
@@ -153,9 +171,11 @@ The body is a `CommandEnvelopeV1` with a
 | 201      | A new message                                                    | `{ conversationId, messageId, intent, taskId? }` |
 | 200      | The same `commandId` came before                                 | The first answer again. No new event.            |
 | 400      | The body is not valid                                            | Problem JSON with `errors` (paths, never values) |
+| 401      | No token, or a token that is not valid                           | Problem JSON                                     |
+| 403      | No `owner` role, or `actor.id` is not the `sub` of the token     | Problem JSON                                     |
 | 409      | The `taskId` is not a task of the thread, or a concurrent append | Problem JSON, `code` `conflict`                  |
 | 413, 415 | The body is too large, or not JSON                               | Problem JSON                                     |
-| 503      | MongoDB does not answer in 5 s                                   | Problem JSON, `code` `unavailable`, no detail    |
+| 503      | MongoDB does not answer in 5 s, or Keycloak cannot be read       | Problem JSON, `code` `unavailable`, no detail    |
 
 The service makes the `messageId` (UUID v4). The events have
 `correlationId` = the `messageId`, `causationId` = the `commandId`, and
@@ -190,22 +210,30 @@ the `ORCHESTRATION` stream, not the `conversation-*` streams.
 
 Environment variables (`.env.example` has all of them):
 
-| Variable                                                            | Default            | Content                                      |
-| ------------------------------------------------------------------- | ------------------ | -------------------------------------------- |
-| `MONGODB_URI`                                                       | required           | MongoDB connection string (replica set)      |
-| `MONGODB_DATABASE`                                                  | `conversation_hub` | Database name                                |
-| `NATS_SERVERS`                                                      | required           | NATS URLs, comma-separated; at least one     |
-| `NATS_USER`                                                         | required           | `ai-systems-conversation-hub` on the cluster |
-| `NATS_PASSWORD`                                                     | required           | From the SealedSecret                        |
-| `PORT`                                                              | `8080`             | HTTP port                                    |
-| `LOG_LEVEL`                                                         | `info`             | pino level                                   |
-| `RELEASE`                                                           | `local`            | Release id in logs and metrics               |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | not set            | Traces go over OTLP only when one is set     |
+| Variable                                                            | Default                                         | Content                                      |
+| ------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------- |
+| `MONGODB_URI`                                                       | required                                        | MongoDB connection string (replica set)      |
+| `MONGODB_DATABASE`                                                  | `conversation_hub`                              | Database name                                |
+| `NATS_SERVERS`                                                      | required                                        | NATS URLs, comma-separated; at least one     |
+| `NATS_USER`                                                         | required                                        | `ai-systems-conversation-hub` on the cluster |
+| `NATS_PASSWORD`                                                     | required                                        | From the SealedSecret                        |
+| `OIDC_ISSUER`                                                       | `https://auth.famashines.com/realms/ai-systems` | Keycloak realm                               |
+| `OIDC_JWKS_URL`                                                     | `<issuer>/protocol/openid-connect/certs`        | JWKS inside the cluster                      |
+| `OIDC_AUDIENCE`                                                     | `ai-systems-app`                                | Audience and `azp` of the token              |
+| `PORT`                                                              | `8080`                                          | HTTP port                                    |
+| `LOG_LEVEL`                                                         | `info`                                          | pino level                                   |
+| `RELEASE`                                                           | `local`                                         | Release id in logs and metrics               |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | not set                                         | Traces go over OTLP only when one is set     |
 
 The kit service name is fixed to `conversation-hub`. So the NATS inbox
 prefix is `_INBOX_conversation-hub`, the durable consumer on
 `ORCHESTRATION` is `conversation-hub`, and the DLQ subjects are
 `dlq.conversation-hub.>`. These are the gitops grants (ADR 0023).
+
+Deploy: set `OIDC_JWKS_URL` to the Keycloak service inside the cluster,
+and add a NetworkPolicy egress from conversation-hub to Keycloak (port
+8080) for the JWKS, as for budget. Keycloak is not a readiness check:
+when the JWKS cannot be read, a command gets 503.
 
 NATS, the relay and the consumer are readiness checks, as in
 projections: the service is not ready while it cannot read
@@ -254,7 +282,18 @@ the parse and goes to the DLQ. So: release contracts, then
 conversation-hub (and the other readers of `ORCHESTRATION`), then
 orchestration.
 
+api-gateway must forward the `Authorization` header of the owner on
+`POST /api/conversations/:id/messages` before this service checks the
+token (M2-17). Deploy that api-gateway first. Else each owner message
+gets 401 here, and api-gateway gives 502.
+
 ## Known limits
+
+- The token is checked twice: at api-gateway and here. A command is
+  refused when the token ends between the two checks (`exp`, with the
+  clock tolerance of `kit/auth`). Send it again with a new token.
+- The JWKS comes over plain HTTP inside the cluster (ARCHITECTURE 11.1,
+  accepted).
 
 - The intent `answer` is not made. Contracts v0.3.0 has no event that
   says a task waits for answers to clarifying questions. It comes with
